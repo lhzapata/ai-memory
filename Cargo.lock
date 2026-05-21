@@ -28,6 +28,7 @@ name = "ai-memory-cli"
 version = "0.1.0"
 dependencies = [
  "ai-memory-core",
+ "ai-memory-store",
  "anyhow",
  "clap",
  "dirs",

@@ -15,24 +15,32 @@ use rusqlite::Connection;
 mod error;
 mod migrations;
 mod ops;
+mod reader;
 mod writer;
 
 pub use error::{StoreError, StoreResult};
+pub use reader::{PageHit, ReaderPool, StatusCounts};
 pub use writer::WriterHandle;
 
 /// Filename used inside the data dir's `db/` subdirectory.
 pub const DB_FILENAME: &str = "memory.sqlite";
 
+/// Default soft cap for the read-only connection pool.
+const READER_POOL_SOFT_CAP: usize = 4;
+
 /// Open (and migrate) a [`Store`] rooted at the given data directory.
 pub struct Store {
     /// Cloneable handle to submit mutations.
     pub writer: WriterHandle,
+    /// Cloneable handle for read-only queries.
+    pub reader: ReaderPool,
     db_path: PathBuf,
 }
 
 impl Store {
     /// Open the SQLite file at `<data_dir>/db/memory.sqlite`, applying any
-    /// outstanding migrations, then spawn the writer thread.
+    /// outstanding migrations, then spawn the writer thread and prepare
+    /// the read-only connection pool.
     ///
     /// # Errors
     /// Returns [`StoreError`] if the file cannot be opened, migrations
@@ -51,7 +59,12 @@ impl Store {
         migrations::run(&mut conn)?;
 
         let writer = WriterHandle::spawn(conn);
-        Ok(Self { writer, db_path })
+        let reader = ReaderPool::new(&db_path, READER_POOL_SOFT_CAP)?;
+        Ok(Self {
+            writer,
+            reader,
+            db_path,
+        })
     }
 
     /// Path of the SQLite file on disk.
@@ -142,5 +155,71 @@ mod tests {
         for h in handles {
             h.await.unwrap().unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn status_counts_zero_on_fresh_db() {
+        let tmp = TempDir::new().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+        let counts = store.reader.status_counts().await.unwrap();
+        assert_eq!(counts.pages_latest, 0);
+        assert_eq!(counts.pages_all, 0);
+        assert_eq!(counts.sessions, 0);
+        assert_eq!(counts.observations, 0);
+    }
+
+    #[tokio::test]
+    async fn search_finds_inserted_page_and_counts_reflect_supersession() {
+        let tmp = TempDir::new().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+        let ws = WorkspaceId::new();
+        let proj = ProjectId::new();
+        store.writer.ensure_workspace(ws, "default").await.unwrap();
+        store
+            .writer
+            .ensure_project(proj, ws, "ai-memory", None)
+            .await
+            .unwrap();
+
+        store
+            .writer
+            .upsert_page(sample_page(
+                ws,
+                proj,
+                "alpha.md",
+                "the quick brown fox jumps over the lazy dog",
+            ))
+            .await
+            .unwrap();
+
+        let hits = store.reader.search_pages("quick".into(), 10).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path.as_str(), "alpha.md");
+        assert!(hits[0].snippet.contains("<mark>quick</mark>"));
+
+        // Supersede: only the latest version should appear in counts'
+        // pages_latest, and search should still return exactly one hit.
+        store
+            .writer
+            .upsert_page(sample_page(
+                ws,
+                proj,
+                "alpha.md",
+                "a different sentence with quick still inside",
+            ))
+            .await
+            .unwrap();
+
+        let counts = store.reader.status_counts().await.unwrap();
+        assert_eq!(counts.pages_latest, 1);
+        assert_eq!(counts.pages_all, 2);
+
+        let hits = store.reader.search_pages("quick".into(), 10).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(
+            hits[0].snippet.contains("different"),
+            "snippet should come from the latest version, got: {}",
+            hits[0].snippet
+        );
     }
 }

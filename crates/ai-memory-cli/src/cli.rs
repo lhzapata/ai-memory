@@ -31,6 +31,8 @@ pub enum Command {
     Init(InitArgs),
     /// Print runtime status (counts, paths, version).
     Status(StatusArgs),
+    /// Full-text search the wiki via FTS5.
+    Search(SearchArgs),
 }
 
 /// Arguments for `init`.
@@ -45,6 +47,19 @@ pub struct InitArgs {
 #[derive(Debug, Args)]
 pub struct StatusArgs {
     /// Emit the report as JSON instead of human-readable text.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Arguments for `search`.
+#[derive(Debug, Args)]
+pub struct SearchArgs {
+    /// FTS5 query string (e.g. `"karpathy wiki"` or `quick OR slow`).
+    pub query: String,
+    /// Maximum number of hits to return.
+    #[arg(short = 'n', long, default_value_t = 10)]
+    pub limit: usize,
+    /// Emit results as JSON.
     #[arg(long)]
     pub json: bool,
 }

@@ -37,6 +37,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::Init(args) => commands::init::run(&config, args),
-        Command::Status(args) => commands::status::run(&config, args),
+        Command::Status(args) => commands::status::run(&config, args).await,
+        Command::Search(args) => commands::search::run(&config, args).await,
     }
 }

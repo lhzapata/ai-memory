@@ -31,6 +31,10 @@ pub enum StoreError {
     #[error("writer actor is no longer running")]
     WriterClosed,
 
+    /// A `spawn_blocking` task panicked or was cancelled.
+    #[error("reader pool task did not complete: {0}")]
+    PoolPanic(String),
+
     /// Re-export of [`MemoryError`] for cross-crate propagation.
     #[error(transparent)]
     Memory(#[from] MemoryError),
