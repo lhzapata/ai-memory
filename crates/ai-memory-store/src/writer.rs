@@ -63,6 +63,18 @@ pub(crate) enum WriteCmd {
         accepting_session: Option<SessionId>,
         reply: oneshot::Sender<StoreResult<()>>,
     },
+    BumpAccess {
+        page_ids: Vec<PageId>,
+        reply: oneshot::Sender<StoreResult<()>>,
+    },
+    SoftDeleteForDecay {
+        page_ids: Vec<PageId>,
+        reply: oneshot::Sender<StoreResult<usize>>,
+    },
+    HardDeleteDecayed {
+        hard_delete_after_days: i64,
+        reply: oneshot::Sender<StoreResult<usize>>,
+    },
     Shutdown,
 }
 
@@ -208,6 +220,49 @@ impl WriterHandle {
         rx.await.map_err(|_| StoreError::WriterClosed)?
     }
 
+    /// Bump access counters for a set of pages (M8 reinforcement term).
+    ///
+    /// # Errors
+    /// Returns [`StoreError::WriterClosed`] or propagates SQL errors.
+    pub async fn bump_access(&self, page_ids: Vec<PageId>) -> StoreResult<()> {
+        let (tx, rx) = oneshot::channel();
+        self.send(WriteCmd::BumpAccess {
+            page_ids,
+            reply: tx,
+        })
+        .await?;
+        rx.await.map_err(|_| StoreError::WriterClosed)?
+    }
+
+    /// Soft-delete pages identified by the M8 forget sweep.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::WriterClosed`] or propagates SQL errors.
+    pub async fn soft_delete_for_decay(&self, page_ids: Vec<PageId>) -> StoreResult<usize> {
+        let (tx, rx) = oneshot::channel();
+        self.send(WriteCmd::SoftDeleteForDecay {
+            page_ids,
+            reply: tx,
+        })
+        .await?;
+        rx.await.map_err(|_| StoreError::WriterClosed)?
+    }
+
+    /// Hard-delete pages soft-deleted by the sweep more than
+    /// `hard_delete_after_days` ago.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::WriterClosed`] or propagates SQL errors.
+    pub async fn hard_delete_decayed(&self, hard_delete_after_days: i64) -> StoreResult<usize> {
+        let (tx, rx) = oneshot::channel();
+        self.send(WriteCmd::HardDeleteDecayed {
+            hard_delete_after_days,
+            reply: tx,
+        })
+        .await?;
+        rx.await.map_err(|_| StoreError::WriterClosed)?
+    }
+
     /// Upsert a batch of pages atomically (one SQL transaction).
     ///
     /// # Errors
@@ -312,6 +367,21 @@ fn worker_loop(mut conn: Connection, mut rx: mpsc::Receiver<WriteCmd>) {
                     accepting_agent,
                     accepting_session.as_ref(),
                 );
+                let _ = reply.send(result);
+            }
+            WriteCmd::BumpAccess { page_ids, reply } => {
+                let result = ops::bump_access_for_pages(&mut conn, &page_ids);
+                let _ = reply.send(result);
+            }
+            WriteCmd::SoftDeleteForDecay { page_ids, reply } => {
+                let result = ops::soft_delete_for_decay(&mut conn, &page_ids);
+                let _ = reply.send(result);
+            }
+            WriteCmd::HardDeleteDecayed {
+                hard_delete_after_days,
+                reply,
+            } => {
+                let result = ops::hard_delete_decayed_pages(&mut conn, hard_delete_after_days);
                 let _ = reply.send(result);
             }
         }

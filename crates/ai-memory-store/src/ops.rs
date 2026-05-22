@@ -375,6 +375,81 @@ pub fn insert_observation(
     Ok(id)
 }
 
+/// Bump `access_count` + `last_accessed_at` for the pages whose ids
+/// appear in `page_ids`. Idempotent for unknown ids (no-op).
+/// Used by the read path to feed the M8 reinforcement term.
+pub fn bump_access_for_pages(conn: &mut Connection, page_ids: &[PageId]) -> StoreResult<()> {
+    if page_ids.is_empty() {
+        return Ok(());
+    }
+    let now = Timestamp::now().as_microsecond();
+    let tx = conn.transaction()?;
+    {
+        let mut stmt = tx.prepare(
+            "UPDATE pages \
+             SET access_count = access_count + 1, last_accessed_at = ?1 \
+             WHERE id = ?2 AND is_latest = 1",
+        )?;
+        for id in page_ids {
+            stmt.execute(params![now, id.as_bytes()])?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// Mark a set of `is_latest=1` pages as soft-deleted by the forget
+/// sweep. Distinguished from M7 supersession by `supersedes IS NULL`.
+pub fn soft_delete_for_decay(conn: &mut Connection, page_ids: &[PageId]) -> StoreResult<usize> {
+    if page_ids.is_empty() {
+        return Ok(0);
+    }
+    let now = Timestamp::now().as_microsecond();
+    let mut affected = 0usize;
+    let tx = conn.transaction()?;
+    {
+        let mut stmt = tx.prepare(
+            "UPDATE pages \
+             SET is_latest = 0, superseded_at = ?1 \
+             WHERE id = ?2 AND is_latest = 1",
+        )?;
+        for id in page_ids {
+            affected += stmt.execute(params![now, id.as_bytes()])?;
+        }
+    }
+    audit(
+        &tx,
+        "soft_delete_for_decay",
+        None,
+        None,
+        None,
+        Timestamp::now().as_microsecond(),
+    )?;
+    tx.commit()?;
+    Ok(affected)
+}
+
+/// Hard-delete rows that were soft-deleted by an earlier sweep at
+/// least `hard_delete_after_days` ago AND received zero subsequent
+/// accesses. Safe: M7 supersedes-chain pages have a non-null
+/// `supersedes` so they never match.
+pub fn hard_delete_decayed_pages(
+    conn: &mut Connection,
+    hard_delete_after_days: i64,
+) -> StoreResult<usize> {
+    let cutoff = Timestamp::now().as_microsecond() - hard_delete_after_days * 86_400_000_000;
+    let n = conn.execute(
+        "DELETE FROM pages \
+         WHERE is_latest = 0 \
+           AND supersedes IS NULL \
+           AND superseded_at IS NOT NULL \
+           AND superseded_at < ?1 \
+           AND access_count = 0",
+        params![cutoff],
+    )?;
+    Ok(n)
+}
+
 /// Insert a new handoff in state=open.
 pub fn insert_handoff(conn: &mut Connection, h: &NewHandoff) -> StoreResult<HandoffId> {
     let id = HandoffId::new();

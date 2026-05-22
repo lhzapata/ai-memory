@@ -2,8 +2,10 @@
 
 pub mod backup;
 pub mod commit;
+pub mod forget_sweep;
 pub mod init;
 pub mod install_hooks;
+pub mod lint;
 pub mod llm_test;
 pub mod reset;
 pub mod restore;

@@ -49,17 +49,20 @@ pub async fn run(config: &Config, args: ServeArgs) -> Result<()> {
         Some(WatcherHandle::start(wiki.clone(), ws, proj)?)
     };
 
-    let mut server = AiMemoryServer::new(store.reader.clone(), store.writer.clone(), ws, proj);
+    let mut server = AiMemoryServer::new(store.reader.clone(), store.writer.clone(), ws, proj)
+        .with_wiki(wiki.clone());
     if let Some(cfg) = provider_from_env()? {
         let llm = ai_memory_llm::build_provider(cfg).context("building LLM provider from env")?;
         info!(
             provider = llm.name(),
             model = llm.model(),
-            "memory_consolidate tool enabled",
+            "memory_consolidate + memory_lint LLM features enabled",
         );
         server = server.with_consolidator(wiki.clone(), llm);
     } else {
-        info!("AI_MEMORY_LLM_PROVIDER unset; memory_consolidate disabled");
+        info!(
+            "AI_MEMORY_LLM_PROVIDER unset; memory_consolidate disabled, lint runs rule-based only"
+        );
     }
 
     match args.transport {

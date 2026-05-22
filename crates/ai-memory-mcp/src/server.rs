@@ -3,8 +3,8 @@
 use std::str::FromStr;
 use std::sync::Arc;
 
-use ai_memory_consolidate::Consolidator;
-use ai_memory_core::{AgentKind, NewHandoff, ProjectId, SessionId, WorkspaceId};
+use ai_memory_consolidate::{Consolidator, run_lint, run_sweep};
+use ai_memory_core::{AgentKind, NewHandoff, PageId, ProjectId, SessionId, WorkspaceId};
 use ai_memory_llm::LlmProvider;
 use ai_memory_store::{ReaderPool, WriterHandle};
 use ai_memory_wiki::Wiki;
@@ -35,6 +35,13 @@ pub struct AiMemoryServer {
     /// Optional LLM consolidator. When `None`, `memory_consolidate`
     /// returns a "not configured" error.
     consolidator: Option<Arc<Consolidator>>,
+    /// Optional LLM provider for the lint contradiction pass. When
+    /// `None`, lint runs only the rule-based checks.
+    llm: Option<Arc<dyn LlmProvider>>,
+    /// Wiki handle (needed by the sweep / lint tools to read pages +
+    /// write the lint report). `None` when the server was built
+    /// without one — older `new()` callers stay safe.
+    wiki: Option<Wiki>,
     // Read by the `#[tool_handler]` macro expansion; rustc's dead-code
     // analysis can't see that, so the lint must be allowed explicitly.
     #[allow(dead_code)]
@@ -66,6 +73,20 @@ struct QueryResponse<T: Serialize> {
 #[derive(Debug, Serialize)]
 struct StatusResponse {
     counts: ai_memory_store::StatusCounts,
+}
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+struct SweepArgs {
+    /// If true, preview only. Default false.
+    #[serde(default)]
+    dry_run: Option<bool>,
+}
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+struct LintArgs {
+    /// If true, don't write wiki/_lint/<date>.md. Default false.
+    #[serde(default)]
+    dry_run: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
@@ -124,23 +145,37 @@ impl AiMemoryServer {
             project_id,
             default_limit: 10,
             consolidator: None,
+            llm: None,
+            wiki: None,
             tool_router: Self::tool_router(),
         }
     }
 
+    /// Attach the wiki handle. Without this, `memory_forget_sweep`
+    /// and `memory_lint` cannot write their report pages.
+    #[must_use]
+    pub fn with_wiki(mut self, wiki: Wiki) -> Self {
+        self.wiki = Some(wiki);
+        self
+    }
+
     /// Attach an LLM-backed consolidator. Without this, the
-    /// `memory_consolidate` tool errors with "not configured".
+    /// `memory_consolidate` tool errors with "not configured". Also
+    /// stores the LLM provider so `memory_lint` can run its
+    /// contradiction pass.
     #[must_use]
     pub fn with_consolidator(mut self, wiki: Wiki, llm: Arc<dyn LlmProvider>) -> Self {
         let consolidator = Consolidator::new(
             self.reader.clone(),
             self.writer.clone(),
-            wiki,
-            llm,
+            wiki.clone(),
+            llm.clone(),
             self.workspace_id,
             self.project_id,
         );
         self.consolidator = Some(Arc::new(consolidator));
+        self.llm = Some(llm);
+        self.wiki = Some(wiki);
         self
     }
 
@@ -160,6 +195,7 @@ impl AiMemoryServer {
             .search_pages(args.query, limit)
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        self.spawn_access_bump(hits.iter().map(|h| h.id).collect());
         let response = QueryResponse { hits };
         ok_json(&response)
     }
@@ -178,8 +214,62 @@ impl AiMemoryServer {
             .recent_pages(limit)
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        self.spawn_access_bump(hits.iter().map(|h| h.id).collect());
         let response = QueryResponse { hits };
         ok_json(&response)
+    }
+
+    /// Run the M8 forget sweep over episodic pages.
+    #[tool(description = "Run the retention sweep: walk is_latest=1 \
+        episodic pages, score them with the agentmemory-style retention \
+        formula (salience * exp(-lambda * age) + sigma * log(1 + accesses) \
+        * exp(-mu * days_since_access)), and soft-delete those below the \
+        cold threshold. Semantic / procedural / pinned pages are exempt. \
+        Pass dry_run=true to preview.")]
+    async fn memory_forget_sweep(
+        &self,
+        Parameters(args): Parameters<SweepArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let params = ai_memory_store::DecayParams::default();
+        let report = run_sweep(
+            &self.reader,
+            &self.writer,
+            self.workspace_id,
+            self.project_id,
+            &params,
+            args.dry_run.unwrap_or(false),
+        )
+        .await
+        .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        ok_json(&report)
+    }
+
+    /// Run the M8 lint pass: rule-based + optional LLM contradiction.
+    #[tool(description = "Audit the wiki for stale episodic pages, \
+        duplicate titles, broken cross-references, and (if an LLM \
+        provider is configured) contradictions across semantic pages. \
+        Findings land in wiki/_lint/<date>.md unless dry_run=true.")]
+    async fn memory_lint(
+        &self,
+        Parameters(args): Parameters<LintArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let Some(wiki) = self.wiki.as_ref() else {
+            return Err(McpError::internal_error(
+                "memory_lint requires the server to be built with a wiki handle",
+                None,
+            ));
+        };
+        let report = run_lint(
+            &self.reader,
+            wiki,
+            self.llm.as_ref(),
+            self.workspace_id,
+            self.project_id,
+            args.dry_run.unwrap_or(false),
+        )
+        .await
+        .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        ok_json(&report)
     }
 
     /// LLM-driven consolidation of a session.
@@ -302,6 +392,23 @@ impl ServerHandler for AiMemoryServer {
             .with_server_info(implementation)
             .with_protocol_version(ProtocolVersion::V_2024_11_05)
             .with_instructions(MEMORY_INSTRUCTIONS.to_string())
+    }
+}
+
+impl AiMemoryServer {
+    /// Fire-and-forget access-counter bump for the M8 reinforcement
+    /// term. Failures are logged at warn but never surfaced to the
+    /// caller.
+    fn spawn_access_bump(&self, ids: Vec<PageId>) {
+        if ids.is_empty() {
+            return;
+        }
+        let writer = self.writer.clone();
+        tokio::spawn(async move {
+            if let Err(e) = writer.bump_access(ids).await {
+                tracing::warn!(error = %e, "access bump failed");
+            }
+        });
     }
 }
 

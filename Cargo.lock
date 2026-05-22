@@ -33,6 +33,7 @@ dependencies = [
 name = "ai-memory-cli"
 version = "0.1.0"
 dependencies = [
+ "ai-memory-consolidate",
  "ai-memory-core",
  "ai-memory-hooks",
  "ai-memory-llm",
@@ -68,6 +69,7 @@ dependencies = [
  "ai-memory-store",
  "ai-memory-wiki",
  "anyhow",
+ "jiff",
  "schemars",
  "serde",
  "serde_json",

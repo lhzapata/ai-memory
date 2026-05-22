@@ -12,14 +12,16 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
 
+pub mod decay;
 mod error;
 mod migrations;
 mod ops;
 mod reader;
 mod writer;
 
+pub use decay::{DecayParams, retention_score};
 pub use error::{StoreError, StoreResult};
-pub use reader::{PageHit, ReaderPool, StatusCounts};
+pub use reader::{DecayCandidate, PageHit, ReaderPool, StatusCounts};
 pub use writer::WriterHandle;
 
 /// Filename used inside the data dir's `db/` subdirectory.

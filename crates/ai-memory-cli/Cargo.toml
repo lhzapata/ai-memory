@@ -13,6 +13,7 @@ name = "ai-memory"
 path = "src/main.rs"
 
 [dependencies]
+ai-memory-consolidate.workspace = true
 ai-memory-core.workspace = true
 ai-memory-hooks.workspace = true
 ai-memory-llm.workspace = true

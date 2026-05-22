@@ -49,5 +49,7 @@ async fn main() -> Result<()> {
         Command::InstallHooks(args) => commands::install_hooks::run(&config, args),
         Command::Commit(args) => commands::commit::run(&config, args),
         Command::LlmTest(args) => commands::llm_test::run(&config, args).await,
+        Command::ForgetSweep(args) => commands::forget_sweep::run(&config, args).await,
+        Command::Lint(args) => commands::lint::run(&config, args).await,
     }
 }

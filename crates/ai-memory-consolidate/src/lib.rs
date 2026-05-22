@@ -9,9 +9,13 @@
 //! M7b extends this to multi-page atomic fan-out.
 
 pub mod consolidator;
+pub mod lint;
+pub mod sweep;
 pub mod types;
 
 pub use consolidator::{Consolidator, ConsolidatorError, ConsolidatorResult};
+pub use lint::{LintError, LintFinding, LintReport, run_lint};
+pub use sweep::{EvictedPage, SweepError, SweepReport, run_sweep};
 pub use types::{
     ConsolidatedBatch, ConsolidatedPage, ConsolidatedPageUpdate, ConsolidationOutcome,
 };

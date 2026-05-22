@@ -51,6 +51,10 @@ pub enum Command {
     Commit(CommitArgs),
     /// Smoke-test an LLM provider by sending one prompt.
     LlmTest(LlmTestArgs),
+    /// Run the M8 retention sweep over episodic pages.
+    ForgetSweep(ForgetSweepArgs),
+    /// Run the M8 lint pass (stale / duplicates + optional LLM contradiction).
+    Lint(LintArgs),
 }
 
 /// Arguments for `init`.
@@ -148,6 +152,28 @@ pub enum LlmProviderChoice {
     Openai,
     /// OpenAI-compatible local (Ollama, vLLM, LM Studio).
     OpenaiCompat,
+}
+
+/// Arguments for `forget-sweep`.
+#[derive(Debug, Args)]
+pub struct ForgetSweepArgs {
+    /// Report what would be evicted without actually mutating.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+/// Arguments for `lint`.
+#[derive(Debug, Args)]
+pub struct LintArgs {
+    /// Compute findings but don't write `wiki/_lint/<date>.md`.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Workspace name (auto-created if absent).
+    #[arg(long, default_value = "default")]
+    pub workspace: String,
+    /// Project name within the workspace (auto-created if absent).
+    #[arg(long, default_value = "scratch")]
+    pub project: String,
 }
 
 /// Arguments for `llm-test`.

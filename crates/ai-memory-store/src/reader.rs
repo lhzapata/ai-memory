@@ -16,6 +16,9 @@ use ai_memory_core::{
 use parking_lot::Mutex;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde::Serialize;
+// `ai_memory_core::Tier` is referenced via fully-qualified path inside the
+// DecayCandidate struct definition above to avoid a top-level import
+// for a single use-site.
 
 use crate::error::{StoreError, StoreResult};
 
@@ -211,6 +214,41 @@ impl ReaderPool {
         .await
     }
 
+    /// Return decay-evaluation candidates for the M8 forget sweep.
+    ///
+    /// Walks `pages` rows with `is_latest = 1` and returns the columns
+    /// the forget sweep needs to compute the retention formula. The
+    /// sweep itself filters by tier (only `episodic`) + pinned flag,
+    /// so this method does not pre-filter -- it just hands the data
+    /// over.
+    ///
+    /// # Errors
+    /// Propagates any SQL or pool error.
+    pub async fn decay_candidates(
+        &self,
+        workspace_id: WorkspaceId,
+        project_id: ProjectId,
+    ) -> StoreResult<Vec<DecayCandidate>> {
+        self.with_conn(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, path, tier, pinned, updated_at, access_count, last_accessed_at, \
+                        frontmatter_json \
+                 FROM pages \
+                 WHERE workspace_id = ?1 AND project_id = ?2 AND is_latest = 1",
+            )?;
+            let rows = stmt.query_map(
+                params![workspace_id.as_bytes(), project_id.as_bytes()],
+                row_to_decay_candidate,
+            )?;
+            let mut out = Vec::new();
+            for r in rows {
+                out.push(r??);
+            }
+            Ok(out)
+        })
+        .await
+    }
+
     /// Return the latest open handoff for the project, optionally
     /// filtered to a specific `cwd`.
     ///
@@ -368,6 +406,76 @@ fn materialise_observation(
                 "bad timestamp: {e}"
             )))
         })?,
+    })
+}
+
+/// One row's worth of input for the M8 retention formula.
+#[derive(Debug, Clone, Serialize)]
+pub struct DecayCandidate {
+    /// Stable identifier.
+    pub id: PageId,
+    /// Relative wiki path.
+    pub path: PagePath,
+    /// Tier (the sweep only considers `episodic`).
+    pub tier: ai_memory_core::Tier,
+    /// Pinned flag — true means "never decay".
+    pub pinned: bool,
+    /// `updated_at` in microseconds since epoch.
+    pub updated_at_us: i64,
+    /// Total query/access hits.
+    pub access_count: u32,
+    /// `last_accessed_at` in microseconds since epoch, or `None` if never accessed.
+    pub last_accessed_at_us: Option<i64>,
+    /// Frontmatter JSON; the sweep peeks at it for an explicit
+    /// `pinned: true` (which overrides the schema flag).
+    pub frontmatter_json: String,
+}
+
+fn row_to_decay_candidate(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<StoreResult<DecayCandidate>> {
+    let id_bytes: Vec<u8> = row.get(0)?;
+    let path: String = row.get(1)?;
+    let tier_str: String = row.get(2)?;
+    let pinned: i64 = row.get(3)?;
+    let updated_at_us: i64 = row.get(4)?;
+    let access_count: i64 = row.get(5)?;
+    let last_accessed_at_us: Option<i64> = row.get(6)?;
+    let frontmatter_json: String = row.get(7)?;
+    Ok(materialise_decay_candidate(
+        id_bytes,
+        path,
+        tier_str,
+        pinned,
+        updated_at_us,
+        access_count,
+        last_accessed_at_us,
+        frontmatter_json,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn materialise_decay_candidate(
+    id_bytes: Vec<u8>,
+    path: String,
+    tier_str: String,
+    pinned: i64,
+    updated_at_us: i64,
+    access_count: i64,
+    last_accessed_at_us: Option<i64>,
+    frontmatter_json: String,
+) -> StoreResult<DecayCandidate> {
+    Ok(DecayCandidate {
+        id: PageId::from_slice(&id_bytes)?,
+        path: PagePath::new(path)?,
+        tier: tier_str
+            .parse::<ai_memory_core::Tier>()
+            .map_err(StoreError::from)?,
+        pinned: pinned != 0,
+        updated_at_us,
+        access_count: u32::try_from(access_count.max(0)).unwrap_or(u32::MAX),
+        last_accessed_at_us,
+        frontmatter_json,
     })
 }
 
