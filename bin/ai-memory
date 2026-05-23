@@ -214,11 +214,19 @@ fi
 # /work path is fresh inside the container so the bind mount
 # resolves cleanly. Commands that don't care about the repo CWD
 # (install-mcp, install-hooks, status, search, …) just ignore it.
+#
+# Because the container sees `/work` (not the host's actual path),
+# `basename(cwd)` would resolve to "work" for every invocation if the
+# CLI used it directly. We pass `AI_MEMORY_HOST_CWD=$PWD` so the
+# binary can derive the *real* host-side project name from it. The
+# `commands::resolve_project_name` helper checks this env var first
+# and falls back to the cwd basename only if it's unset.
 exec "${DOCKER}" run --rm "${TTY_ARGS[@]}" \
   -v "${HOME}:${HOME}" \
   -v "${PWD}:/work" \
   -w /work \
   -e HOME="${HOME}" \
+  -e AI_MEMORY_HOST_CWD="${PWD}" \
   -u "$(id -u):$(id -g)" \
   "${DATA_ARGS[@]}" \
   "${ENV_ARGS[@]}" \

@@ -31,9 +31,17 @@ pub mod write_page;
 ///
 /// Precedence:
 /// 1. `explicit` (the user's `--project` flag) when non-empty.
-/// 2. Basename of the git repo root walked up from CWD (handles
+/// 2. `AI_MEMORY_HOST_CWD` env var. The docker wrapper sets this
+///    to the host's `$PWD` because inside the container the workdir
+///    is always `/work` (a bind mount), so the container's own
+///    `current_dir()` returns "work" for every invocation. Without
+///    this env var, every dockerised bootstrap would land in project
+///    `default/work` regardless of which host dir it was actually
+///    run from. Honoured here as a basename, same heuristic as the
+///    other fallbacks.
+/// 3. Basename of the git repo root walked up from CWD (handles
 ///    running from any subdir of the project).
-/// 3. Basename of the bare CWD (covers non-git directories).
+/// 4. Basename of the bare CWD (covers non-git directories).
 ///
 /// Mirrors the heuristic the hook router uses in
 /// `ai-memory-hooks::router::resolve_project_ids`, so commands
@@ -43,6 +51,14 @@ pub mod write_page;
 pub(crate) fn resolve_project_name(explicit: Option<&str>) -> Result<String> {
     if let Some(p) = explicit.filter(|s| !s.is_empty()) {
         return Ok(p.to_string());
+    }
+    if let Ok(host_cwd) = std::env::var("AI_MEMORY_HOST_CWD")
+        && let Some(name) = std::path::Path::new(&host_cwd)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .filter(|s| !s.is_empty())
+    {
+        return Ok(name.to_string());
     }
     if let Ok(root) = ai_memory_consolidate::discover_repo_root(std::path::Path::new("."))
         && let Some(name) = root
