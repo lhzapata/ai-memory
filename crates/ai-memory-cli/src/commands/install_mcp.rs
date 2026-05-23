@@ -277,30 +277,41 @@ fn codex_upsert_mcp_server(
 
     // Build our `[mcp_servers.<name>]` as a block-style table.
     //
-    // IMPORTANT: Codex's MCP schema (per
-    // `openai/codex/codex-rs/config/src/mcp_types.rs`) supports the
-    // following keys for an HTTP-transport entry:
+    // IMPORTANT: Codex's MCP schema (verified against
+    // `openai/codex/codex-rs/config/src/mcp_types.rs`) draws a hard
+    // line between transports. For STREAMABLE_HTTP (which ai-memory
+    // uses — `url = "...mcp"` triggers this transport), the
+    // allowed auth-related keys are:
     //
-    //   url                  string         the /mcp endpoint
-    //   bearer_token         string         literal bearer token
-    //   bearer_token_env_var string         env var name holding the token
-    //   http_headers         table          static custom headers
-    //   env_http_headers     table          env-var-backed custom headers
-    //   oauth                table          OAuth client config
-    //   …
+    //   bearer_token_env_var  string  env-var NAME holding the token
+    //   http_headers          table   static headers map
+    //   env_http_headers      table   header_name → env_var_name
     //
-    // We use `bearer_token` (literal) — the user already provided
-    // the token via --auth-token, embedding it directly avoids the
-    // shell-profile-editing step required by env_var indirection.
+    // `bearer_token` (literal) is rejected with
+    //   "bearer_token is not supported for streamable_http"
+    // — it's a stdio-transport-only key. Confusingly the field
+    // sits in the same struct, but throw_if_set guards it for
+    // streamable_http.
     //
-    // The previous shape used `[mcp_servers.<name>.headers]`
-    // (the wrong key, with no support in Codex's schema), which
-    // Codex silently ignored and then prompted the user with
-    // "Run `codex mcp login <name>`" — the OAuth fallback.
+    // We use [mcp_servers.<name>.http_headers] with a literal
+    // Authorization header. Static, no env-var dance required.
+    //
+    // History note (so the next maintainer doesn't repeat this):
+    //   - v1: emitted `[mcp_servers.X.headers]` — wrong key name
+    //     entirely, Codex silently ignored it and fell back to
+    //     OAuth ("Run `codex mcp login <name>`").
+    //   - v2: switched to top-level `bearer_token = "..."` — also
+    //     wrong; Codex rejects this for streamable_http with the
+    //     "bearer_token is not supported" error.
+    //   - v3 (this): `[mcp_servers.X.http_headers]` with
+    //     `Authorization = "Bearer ..."`. Codex schema-validates
+    //     and uses it as a static auth header.
     let mut server = Table::new();
     server["url"] = value(args.server_url.clone());
-    if let Some(t) = args.auth_token.as_deref() {
-        server["bearer_token"] = value(t);
+    if let Some(b) = bearer_header_value_shared(args.auth_token.as_deref()) {
+        let mut headers = Table::new();
+        headers["Authorization"] = value(b);
+        server["http_headers"] = Item::Table(headers);
     }
 
     // Replace `mcp_servers` wholesale with a fresh implicit parent
@@ -358,11 +369,13 @@ fn render_codex(args: &InstallMcpArgs) -> String {
     // Codex uses TOML, not JSON. Hand-render the snippet so the
     // table headers stay deterministic.
     //
-    // Schema: Codex's MCP HTTP transport uses `bearer_token`
-    // (literal) or `bearer_token_env_var` (env-var indirection)
-    // for auth — NOT a `[mcp_servers.<name>.headers]` sub-table.
-    // The wrong key just makes Codex fall back to its OAuth
-    // login flow ("Run `codex mcp login <name>`").
+    // Schema: Codex's MCP `streamable_http` transport accepts
+    //   - `bearer_token_env_var = "NAME"` (env-var indirection)
+    //   - `[mcp_servers.<name>.http_headers]` (static headers)
+    //   - `[mcp_servers.<name>.env_http_headers]` (env-var-sourced headers)
+    // — NOT a literal `bearer_token = "..."` (that's stdio-only)
+    // and NOT a `[mcp_servers.<name>.headers]` sub-table (the key
+    // is `http_headers`, with the `http_` prefix).
     let mut out = format!(
         "# Codex CLI — append to ~/.codex/config.toml\n\
          #\n\
@@ -371,12 +384,15 @@ fn render_codex(args: &InstallMcpArgs) -> String {
         name = args.name,
         url = args.server_url,
     );
-    if let Some(t) = args.auth_token.as_deref() {
+    if let Some(b) = bearer_header_value(args) {
         out.push_str(&format!(
-            "bearer_token = \"{t}\"\n\
-             # Or, to avoid embedding the literal:\n\
+            "\n[mcp_servers.{name}.http_headers]\n\
+             Authorization = \"{b}\"\n\
+             # Alternative (avoids embedding the literal token):\n\
              # bearer_token_env_var = \"AI_MEMORY_AUTH_TOKEN\"\n\
-             # (and export AI_MEMORY_AUTH_TOKEN in your shell before starting codex)\n",
+             # — and export AI_MEMORY_AUTH_TOKEN in your shell init.\n",
+            name = args.name,
+            b = b,
         ));
     }
     out
@@ -568,22 +584,17 @@ mod tests {
             McpClient::Openclaw,
         ] {
             let out = render_with_token(client);
-            // Most clients (Claude Code / Cursor / Gemini / OpenCode /
-            // ClaudeDesktop / OpenClaw) embed the token as an
-            // `Authorization: Bearer <token>` header — assert
-            // "Bearer <token>".
-            //
-            // Codex's TOML schema uses `bearer_token = "<token>"`
-            // directly (no `Bearer ` prefix in the file). Assert
-            // the raw token appears under the right key.
-            let expected = if matches!(client, McpClient::Codex) {
-                "bearer_token = \"test-token-deadbeef\""
-            } else {
-                "Bearer test-token-deadbeef"
-            };
+            // Every client embeds the token as `Authorization:
+            // Bearer <token>` in some flavour of headers map — the
+            // exact key path differs (Codex uses `http_headers`,
+            // OpenCode uses `headers`, Cursor / Gemini / Claude
+            // Desktop / Claude Code use `headers` inside their
+            // server entry, etc.), but the literal `Bearer
+            // <token>` substring shows up in all of them. Keep
+            // the assertion uniform.
             assert!(
-                out.contains(expected),
-                "client {client:?} did not embed the bearer token (expected {expected:?}):\n{out}"
+                out.contains("Bearer test-token-deadbeef"),
+                "client {client:?} did not embed the bearer token:\n{out}"
             );
         }
     }
@@ -660,19 +671,31 @@ mod tests {
             out.contains("[mcp_servers.ai-memory]"),
             "expected block-form table header, got:\n{out}"
         );
-        // Bearer token lives on the SERVER table as `bearer_token`,
-        // not under a `[mcp_servers.X.headers]` sub-table. The
-        // previous shape was the wrong key (`headers` doesn't exist
-        // in Codex's MCP schema; the correct keys are `bearer_token`
-        // / `bearer_token_env_var` / `http_headers` / `env_http_headers`)
-        // and made Codex prompt for OAuth on every start.
+        // Auth lives on the [mcp_servers.X.http_headers] sub-table
+        // with an Authorization: Bearer <token> value. The key is
+        // `http_headers` (with the `http_` prefix) per Codex's
+        // streamable_http schema. Two related regressions guarded
+        // here:
+        //   - the legacy `headers` key (no `http_` prefix) made
+        //     Codex silently fall back to OAuth login;
+        //   - a top-level `bearer_token = "..."` was rejected with
+        //     "bearer_token is not supported for streamable_http"
+        //     (that key is stdio-transport-only).
         assert!(
-            out.contains("bearer_token = \"test-token-deadbeef\""),
-            "expected `bearer_token = \"...\"` in the server table, got:\n{out}"
+            out.contains("[mcp_servers.ai-memory.http_headers]"),
+            "expected `[mcp_servers.X.http_headers]` sub-table, got:\n{out}"
+        );
+        assert!(
+            out.contains("Authorization = \"Bearer test-token-deadbeef\""),
+            "expected the Authorization header in the http_headers sub-table, got:\n{out}"
         );
         assert!(
             !out.contains("[mcp_servers.ai-memory.headers]"),
-            "the legacy `[mcp_servers.X.headers]` sub-table is invalid in Codex's schema; should NOT be emitted, got:\n{out}"
+            "legacy `headers` key (no `http_` prefix) must not be emitted; got:\n{out}"
+        );
+        assert!(
+            !out.contains("\nbearer_token ="),
+            "top-level `bearer_token` is rejected for streamable_http; must not be emitted; got:\n{out}"
         );
         assert!(
             !out.contains("mcp_servers = {"),
