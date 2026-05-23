@@ -19,6 +19,7 @@ use tracing::info;
 
 use crate::cli::BootstrapArgs;
 use crate::config::Config;
+use crate::http_client::{ServerEndpoint, post_json};
 
 /// Run the `bootstrap` subcommand.
 ///
@@ -30,20 +31,8 @@ use crate::config::Config;
 /// path is not a git repo, when source collection fails, or when the
 /// server returns a non-2xx response.
 pub async fn run(_config: &Config, args: BootstrapArgs) -> Result<()> {
-    // ---- server URL — defaults to loopback ------------------------
-    // The CLI is a thin HTTP client. With no env var it talks to a
-    // local server on the default port; set AI_MEMORY_SERVER_URL to
-    // point at a remote (e.g. homelab).
-    let server_url = std::env::var("AI_MEMORY_SERVER_URL")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "http://127.0.0.1:49374".to_string());
-    // Bearer is optional: only sent when the env var is non-empty.
-    // A loopback server with no token set accepts every request.
-    let auth_token = std::env::var("AI_MEMORY_AUTH_TOKEN")
-        .ok()
-        .filter(|s| !s.is_empty());
-    info!(%server_url, auth = auth_token.is_some(), "bootstrap CLI configured");
+    let ep = ServerEndpoint::from_env();
+    info!(server = %ep.url, auth = ep.auth_token.is_some(), "bootstrap CLI configured");
 
     // ---- repo path — auto-detect if absent -------------------------
     let repo_path = match args.repo_path {
@@ -70,8 +59,6 @@ pub async fn run(_config: &Config, args: BootstrapArgs) -> Result<()> {
     info!(sources = sources.len(), "collected sources from repo");
 
     // ---- POST to server -------------------------------------------
-    let client = reqwest::Client::new();
-    let url = format!("{}/admin/bootstrap", server_url.trim_end_matches('/'));
     let body = serde_json::json!({
         "workspace": args.workspace,
         "project": args.project,
@@ -80,20 +67,7 @@ pub async fn run(_config: &Config, args: BootstrapArgs) -> Result<()> {
         "dry_run": args.dry_run,
         "force": args.force,
     });
-    let mut req = client.post(&url).json(&body);
-    if let Some(t) = &auth_token {
-        req = req.bearer_auth(t);
-    }
-    let resp = req.send().await.context("POST /admin/bootstrap")?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        bail!("server returned {}: {}", status, text);
-    }
-    let outcome: BootstrapOutcome = resp
-        .json()
-        .await
-        .context("parsing BootstrapOutcome JSON from server response")?;
+    let outcome: BootstrapOutcome = post_json(&ep, "/admin/bootstrap", &body).await?;
 
     print_human_report(&outcome, &args.workspace, &args.project);
     let report = serde_json::to_string_pretty(&outcome)?;

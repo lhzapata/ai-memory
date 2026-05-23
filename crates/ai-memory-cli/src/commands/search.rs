@@ -1,23 +1,37 @@
 //! `ai-memory search` — run an FTS5 query against the wiki index.
+//!
+//! Thin HTTP client. Calls `GET /admin/search?q=…&limit=…`; renders
+//! the hits as human text or JSON. Never opens the store directly.
 
-use ai_memory_store::Store;
-use anyhow::{Context, Result};
+use anyhow::Result;
+use serde::{Deserialize, Serialize};
 
 use crate::cli::SearchArgs;
 use crate::config::Config;
+use crate::http_client::{ServerEndpoint, get_json};
+
+/// FTS5 hit, mirrors `ai_memory_store::PageHit` fields used here.
+#[derive(Debug, Deserialize, Serialize)]
+struct Hit {
+    path: String,
+    title: String,
+    snippet: String,
+    rank: f64,
+}
 
 /// Run the `search` subcommand.
 ///
 /// # Errors
-/// Returns an error if the store cannot be opened, the query is malformed,
-/// or JSON serialisation fails.
-pub async fn run(config: &Config, args: SearchArgs) -> Result<()> {
-    let store = Store::open(&config.data_dir)
-        .with_context(|| format!("opening store at {}", config.data_dir.display()))?;
-    let hits = store
-        .reader
-        .search_pages(args.query.clone(), args.limit)
-        .await?;
+/// Returns an error if the server is unreachable or returns non-2xx.
+pub async fn run(_config: &Config, args: SearchArgs) -> Result<()> {
+    let ep = ServerEndpoint::from_env();
+    let limit_str = args.limit.to_string();
+    let hits: Vec<Hit> = get_json(
+        &ep,
+        "/admin/search",
+        &[("q", args.query.as_str()), ("limit", limit_str.as_str())],
+    )
+    .await?;
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&hits)?);

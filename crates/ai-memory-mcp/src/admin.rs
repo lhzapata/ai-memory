@@ -1,13 +1,18 @@
 //! Admin HTTP routes — state-touching operations invoked by the CLI
-//! over plain HTTP (not MCP). Currently exposes `POST /admin/bootstrap`.
+//! over plain HTTP (not MCP). Currently exposes:
 //!
-//! The bootstrap route accepts a pre-collected source bundle from the
-//! CLI, runs the LLM summarisation + wiki write server-side, and
-//! returns the [`BootstrapOutcome`] as JSON. The CLI is responsible for
-//! filesystem access (collecting sources from the project repo); the
-//! server is responsible for all state writes.
+//! - `POST /admin/bootstrap` — ingest a pre-collected source bundle
+//!   into seed wiki pages via the configured LLM provider.
+//! - `GET  /admin/status`    — lifetime counts + server data-dir info.
+//! - `GET  /admin/search?q=` — FTS5 hits against the wiki index.
+//!
+//! The CLI is responsible for filesystem access (collecting sources from
+//! the project repo, rendering output for humans); the server is
+//! responsible for all state reads/writes against the wiki + SQLite.
 
 use std::sync::Arc;
+
+use std::path::PathBuf;
 
 use ai_memory_consolidate::{
     Bootstrap, BootstrapConfig, BootstrapOutcome, BootstrapSource, SourceCounts,
@@ -17,11 +22,11 @@ use ai_memory_store::{ReaderPool, WriterHandle};
 use ai_memory_wiki::Wiki;
 use axum::Json;
 use axum::Router;
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::routing::post;
-use serde::Deserialize;
+use axum::routing::{get, post};
+use serde::{Deserialize, Serialize};
 
 /// Shared state for the admin router.
 #[derive(Clone)]
@@ -34,6 +39,14 @@ pub struct AdminState {
     pub wiki: Wiki,
     /// Optional LLM provider. When `None`, bootstrap returns 503.
     pub llm: Option<Arc<dyn LlmProvider>>,
+    /// Server's resolved data directory (e.g. `/data` in the docker
+    /// image). Surfaced via `/admin/status` so the CLI can report
+    /// "where the wiki + db actually live".
+    pub data_dir: PathBuf,
+    /// Resolved SQLite path inside `data_dir`. Same purpose as above.
+    pub db_path: PathBuf,
+    /// Server's bind address — informational, surfaced in /admin/status.
+    pub bind: String,
 }
 
 /// JSON request body for `POST /admin/bootstrap`.
@@ -60,12 +73,99 @@ fn default_max_input_tokens() -> usize {
     50_000
 }
 
-/// Build the admin axum [`Router`]. Mounts `POST /admin/bootstrap`.
+/// Build the admin axum [`Router`]. Mounts:
+/// - `POST /admin/bootstrap`
+/// - `GET  /admin/status`
+/// - `GET  /admin/search`
 pub fn admin_router(state: AdminState) -> Router {
     Router::new()
         .route("/admin/bootstrap", post(handle_bootstrap))
+        .route("/admin/status", get(handle_status))
+        .route("/admin/search", get(handle_search))
         .with_state(Arc::new(state))
 }
+
+// ---------------------------------------------------------------------
+// status
+// ---------------------------------------------------------------------
+
+/// JSON response body for `GET /admin/status`. The CLI's `status`
+/// subcommand renders this either as JSON (`--json`) or as a small
+/// human-friendly text block.
+#[derive(Debug, Serialize)]
+pub struct StatusReport {
+    /// Server binary version (Cargo package version).
+    pub version: String,
+    /// Absolute data directory the server uses (server-side path).
+    pub data_dir: String,
+    /// Bind address the HTTP transport is listening on.
+    pub bind: String,
+    /// Absolute SQLite path inside `data_dir`.
+    pub db_path: String,
+    /// Lifetime counts: pages_latest, pages_all, sessions, observations.
+    pub counts: ai_memory_store::StatusCounts,
+}
+
+async fn handle_status(State(state): State<Arc<AdminState>>) -> impl IntoResponse {
+    match state.reader.status_counts().await {
+        Ok(counts) => {
+            let report = StatusReport {
+                version: env!("CARGO_PKG_VERSION").to_string(),
+                data_dir: state.data_dir.display().to_string(),
+                bind: state.bind.clone(),
+                db_path: state.db_path.display().to_string(),
+                counts,
+            };
+            (
+                StatusCode::OK,
+                Json(serde_json::to_value(&report).unwrap_or_else(|_| serde_json::json!({}))),
+            )
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        ),
+    }
+}
+
+// ---------------------------------------------------------------------
+// search
+// ---------------------------------------------------------------------
+
+/// Query string for `GET /admin/search?q=…&limit=…`.
+#[derive(Debug, Deserialize)]
+struct SearchQuery {
+    /// FTS5 query expression.
+    q: String,
+    /// Max number of hits to return. Capped at 100 server-side.
+    #[serde(default = "default_search_limit")]
+    limit: usize,
+}
+
+fn default_search_limit() -> usize {
+    10
+}
+
+async fn handle_search(
+    State(state): State<Arc<AdminState>>,
+    Query(query): Query<SearchQuery>,
+) -> impl IntoResponse {
+    let limit = query.limit.clamp(1, 100);
+    match state.reader.search_pages(query.q, limit).await {
+        Ok(hits) => (
+            StatusCode::OK,
+            Json(serde_json::to_value(&hits).unwrap_or_else(|_| serde_json::json!([]))),
+        ),
+        Err(e) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        ),
+    }
+}
+
+// ---------------------------------------------------------------------
+// bootstrap
+// ---------------------------------------------------------------------
 
 async fn handle_bootstrap(
     State(state): State<Arc<AdminState>>,

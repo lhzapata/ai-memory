@@ -17,6 +17,7 @@ mod auth;
 mod cli;
 mod commands;
 mod config;
+mod http_client;
 mod logging;
 mod process_guard;
 

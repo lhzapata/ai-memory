@@ -19,11 +19,15 @@ use tower::ServiceExt;
 async fn make_admin_state(tmp: &TempDir) -> AdminState {
     let store = Store::open(tmp.path()).unwrap();
     let wiki = Wiki::new(tmp.path(), store.writer.clone()).unwrap();
+    let db_path = store.db_path().to_path_buf();
     AdminState {
         writer: store.writer.clone(),
         reader: store.reader.clone(),
         wiki,
         llm: None, // no LLM — dry-run path only
+        data_dir: tmp.path().to_path_buf(),
+        db_path,
+        bind: "127.0.0.1:0".to_string(),
     }
 }
 
