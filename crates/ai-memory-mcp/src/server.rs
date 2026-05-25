@@ -1078,6 +1078,8 @@ mod tests {
                 workspace_id: ws,
                 project_id: proj,
                 kind: ObservationKind::UserPrompt,
+                extension: None,
+                source_event: None,
                 title: "raw prompt".into(),
                 body: "raw fallback contains quokka only detail".into(),
                 importance: 5,

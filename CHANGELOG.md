@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added
+- Opt-in extension event metadata for `/hook`: custom integrations can
+  pass `extension=<namespace>` (and optionally `source_event=<name>`) to
+  preserve a validated third-party source event while storage keeps the
+  canonical `ObservationKind` closed. Unknown events without an extension
+  still collapse to `other` with no source-event metadata.
 - `.ai-memory.toml` marker file lets a directory tree declare its
   `workspace` (required) and `project` (optional) without depending on
   `basename($cwd)`. Lifecycle hook scripts walk up from `cwd` to find
