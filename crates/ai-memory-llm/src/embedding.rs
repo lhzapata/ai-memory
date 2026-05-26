@@ -150,11 +150,16 @@ fn parse_openai_embedding_values(body: &str, status: u16) -> LlmResult<Vec<f32>>
                     512,
                 ),
             })?;
-        let mut out = Vec::new();
+        let mut out = Vec::with_capacity(emb.len());
         for n in emb {
-            if let Some(f) = n.as_f64() {
-                out.push(f as f32);
-            }
+            let f = n.as_f64().ok_or_else(|| LlmError::Provider {
+                status,
+                body: truncate_with_ellipsis(
+                    &format!("non-numeric embedding value in data[0]; body={body}"),
+                    512,
+                ),
+            })?;
+            out.push(f as f32);
         }
         if !out.is_empty() {
             return Ok(out);
@@ -488,5 +493,12 @@ mod tests {
         let body = r#"{"error":{"message":"Provider returned error","code":502}}"#;
         let err = parse_openai_embedding_values(body, 502).unwrap_err();
         assert!(matches!(err, LlmError::Provider { status: 502, .. }));
+    }
+
+    #[test]
+    fn parse_openai_embedding_rejects_non_numeric_values() {
+        let body = r#"{"data":[{"embedding":[0.1,"oops",0.3]}]}"#;
+        let err = parse_openai_embedding_values(body, 200).unwrap_err();
+        assert!(matches!(err, LlmError::Provider { status: 200, .. }));
     }
 }
