@@ -166,6 +166,7 @@ basic-memory has ~25 tools, agentmemory has 53. Both have user confusion as a re
 | `memory_handoff_begin` | Mark session boundary, write handoff | destructive |
 | `memory_handoff_accept` | Fetch + ack the latest open handoff | destructive |
 | `memory_consolidate` | LLM-driven page rewrite (`multi_page=true` for atomic fan-out) | destructive |
+| `memory_write_page` | Write durable wiki knowledge on explicit user request | destructive |
 | `memory_forget_sweep` | Retention sweep (M8); soft-delete below cold threshold; `dry_run=true` previews | destructive |
 | `memory_lint` | Rule-based + optional LLM contradiction findings → `wiki/_lint/<date>.md` | destructive |
 | `memory_install_self_routing` | Returns the canonical CLAUDE.md / AGENTS.md routing block + per-agent filename hints | read-only |

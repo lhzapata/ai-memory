@@ -22,7 +22,7 @@ use serde_json::json;
 use crate::cli::{InstallMcpArgs, McpClient};
 use crate::commands::apply_shared::{ApplyOutcome, apply_atomic, mutate_json, mutate_toml};
 use crate::commands::render_shared::bearer_header_value;
-use crate::config::Config;
+use crate::config::{Config, DEFAULT_MCP_URL};
 
 const GEMINI_MCP_TIMEOUT_MS: u64 = 5000;
 
@@ -39,7 +39,9 @@ enum JsonMcpLocation {
 /// Returns an error if JSON serialisation fails (should never happen
 /// for our handcrafted values).
 pub fn run(config: &Config, args: InstallMcpArgs) -> Result<()> {
+    let server_url = effective_mcp_server_url(config, &args);
     let args = InstallMcpArgs {
+        server_url,
         auth_token: args.auth_token.or_else(|| config.auth.bearer_token.clone()),
         ..args
     };
@@ -59,6 +61,25 @@ pub fn run(config: &Config, args: InstallMcpArgs) -> Result<()> {
     };
     println!("{snippet}");
     Ok(())
+}
+
+fn effective_mcp_server_url(config: &Config, args: &InstallMcpArgs) -> String {
+    if args.server_url != DEFAULT_MCP_URL {
+        return args.server_url.clone();
+    }
+    if config.server_url_configured() {
+        return mcp_server_url_from_base(&config.server_url);
+    }
+    args.server_url.clone()
+}
+
+fn mcp_server_url_from_base(server_url: &str) -> String {
+    let trimmed = server_url.trim().trim_end_matches('/');
+    if trimmed.ends_with("/mcp") {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}/mcp")
+    }
 }
 
 /// Default MCP config-file path for a client (ignores any
@@ -671,6 +692,49 @@ mod tests {
             McpClient::Pi => render_pi(&args).unwrap(),
             McpClient::AntigravityCli => render_antigravity_cli(&args).unwrap(),
         }
+    }
+
+    #[test]
+    fn mcp_server_url_defaults_to_configured_server_url() {
+        let config = Config {
+            server_url: "http://192.168.0.90:49374/".into(),
+            ..Config::default()
+        };
+        let args = args_for(McpClient::OpenCode);
+
+        assert_eq!(
+            effective_mcp_server_url(&config, &args),
+            "http://192.168.0.90:49374/mcp"
+        );
+    }
+
+    #[test]
+    fn mcp_server_url_does_not_duplicate_mcp_suffix() {
+        let config = Config {
+            server_url: "http://192.168.0.90:49374/mcp".into(),
+            ..Config::default()
+        };
+        let args = args_for(McpClient::OpenCode);
+
+        assert_eq!(
+            effective_mcp_server_url(&config, &args),
+            "http://192.168.0.90:49374/mcp"
+        );
+    }
+
+    #[test]
+    fn mcp_server_url_explicit_flag_wins_over_config() {
+        let config = Config {
+            server_url: "http://homelab:49374".into(),
+            ..Config::default()
+        };
+        let mut args = args_for(McpClient::OpenCode);
+        args.server_url = "http://explicit:49374/mcp".into();
+
+        assert_eq!(
+            effective_mcp_server_url(&config, &args),
+            "http://explicit:49374/mcp"
+        );
     }
 
     /// Specific shape checks — each client has a distinguishing key

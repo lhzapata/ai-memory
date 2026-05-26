@@ -4,8 +4,10 @@
 This project uses [ai-memory](https://github.com/akitaonrails/ai-memory)
 for cross-session continuity. **Lifecycle hooks already capture every
 prompt + tool call automatically.** You never need to manually write
-notes; the SessionStart hook auto-fetches pending handoffs and the
-SessionEnd hook auto-consolidates. Just *use* the read tools.
+routine notes; the SessionStart hook auto-fetches pending handoffs and
+the SessionEnd hook auto-consolidates. Only write a durable wiki page
+when the user explicitly asks to remember or annotate something
+permanently.
 
 ### When to reach for each tool
 
@@ -21,8 +23,9 @@ match the intent to the tool. They do not need to name the tool.
 | "catch me up" / "I've been away" / "what's important right now?" / open-ended exploration | `memory_explore` |
 | "where did we leave off?" — and you see a `📥 ai-memory: pending handoff` block in your context | already done — answer from that block; do NOT re-call `memory_handoff_accept` |
 | "where did we leave off?" — and no such block is visible | `memory_handoff_accept` (rare; the SessionStart hook usually got there first) |
-| "save context for the next session" / wrapping up | `memory_handoff_begin` (terse summary; put detail in `open_questions` + `next_steps` bullets) |
+| "save context for the next session" / wrapping up | `memory_handoff_begin` (single-use handoff; terse summary; put detail in `open_questions` + `next_steps` bullets) |
 | "consolidate this session" / "compile what we learned" (usually automatic) | `memory_consolidate` |
+| "remember this permanently" / "save a note" / "add an annotation" / durable project knowledge | `memory_write_page` (write a wiki page; do **not** use handoff for permanent notes) |
 | "audit the wiki" / "find contradictions" / "what rules should we add?" | `memory_lint` |
 | "prune old pages" / "memory cleanup" | `memory_forget_sweep` |
 
@@ -63,6 +66,9 @@ without disturbing the rest of the file.
 - When a change affects user-visible behavior, installation, supported
   platforms, supported agents, providers, or deployment, update
   `CHANGELOG.md` and the README/docs support references in the same commit.
+- When the MCP tool surface changes, update `MEMORY_INSTRUCTIONS`,
+  `ai_memory_core::SNIPPET_BODY`, README/docs tool references, and regression
+  tests that assert every tool appears in both prompt surfaces.
 
 ## Rust Engineering Rules
 

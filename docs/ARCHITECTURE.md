@@ -196,7 +196,7 @@ Each crate has a single responsibility and exposes a typed API. No
 circular deps. Inter-crate boundaries enforce the cross-cutting
 invariants below.
 
-## MCP tool surface (11 tools)
+## MCP tool surface (12 tools)
 
 | Tool | Hint | Purpose |
 |---|---|---|
@@ -208,18 +208,21 @@ invariants below.
 | `memory_handoff_begin` | destructive | Open a handoff for the next agent. |
 | `memory_handoff_accept` | destructive | Fetch + ack the latest open handoff (auto-cwd-matched). |
 | `memory_consolidate` | destructive | LLM-driven page rewrite. `multi_page=true` for atomic fan-out. |
+| `memory_write_page` | destructive | Write durable wiki knowledge when the user explicitly asks to remember/annotate something permanent. |
 | `memory_forget_sweep` | destructive | M8 retention pass. `dry_run=true` for preview. |
 | `memory_lint` | destructive | Rule-based + LLM contradiction findings → `wiki/_lint/`. |
 | `memory_install_self_routing` | read-only | Return the canonical routing snippet for CLAUDE.md / AGENTS.md. |
 
-`memory_briefing`, `memory_explore` and `memory_install_self_routing`
+`memory_briefing`, `memory_explore`, `memory_write_page`, and
+`memory_install_self_routing`
 post-date the original "narrow on purpose" cut (§10 of
 `design-decisions.md`): briefing/explore separate the structured vs.
-prose halves of "what's going on", and `memory_install_self_routing`
-exists for the meta case where the agent must re-write its own routing
-rules into a project's `CLAUDE.md` / `AGENTS.md`. The narrow-surface
-discipline still holds — every new tool has to earn its slot — but the
-v1 count is 11, not 10.
+prose halves of "what's going on", `memory_write_page` covers explicit
+durable annotations without abusing single-use handoffs, and
+`memory_install_self_routing` exists for the meta case where the agent
+must re-write its own routing rules into a project's `CLAUDE.md` /
+`AGENTS.md`. The narrow-surface discipline still holds — every new tool
+has to earn its slot — but the v1 count is 12, not 10.
 
 MCP parameter aliases are intentionally sparse: `memory_query.query` accepts
 `q|search`, and limit fields accept `n` / `top_k` where shipped. Project and

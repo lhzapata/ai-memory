@@ -19,15 +19,16 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use crate::cli::{AgentChoice, InstallHooksArgs};
+use crate::cli::{AgentChoice, InstallHooksArgs, McpClient};
 use crate::commands::apply_shared::{ApplyOutcome, apply_atomic, mutate_json};
+use crate::commands::install_mcp;
 use crate::commands::openclaw_plugin;
 use crate::commands::render_shared::{
     CURSOR_PROFILE, GEMINI_PROFILE, build_antigravity_payload, build_claude_code_payload,
     build_codex_payload, build_profile_payload, hook_script_for_current_platform,
     ts_string_literal,
 };
-use crate::config::Config;
+use crate::config::{Config, DEFAULT_SERVER_URL};
 
 /// `~/.claude/settings.json` — Claude Code hooks live under `hooks`.
 pub(crate) fn claude_settings_path() -> anyhow::Result<std::path::PathBuf> {
@@ -95,66 +96,199 @@ pub(crate) fn omp_extension_path() -> anyhow::Result<std::path::PathBuf> {
 /// # Errors
 /// Returns an error if the hook script directory cannot be located.
 pub fn run(config: &Config, args: InstallHooksArgs) -> Result<()> {
+    let inferred = if args.server_url == DEFAULT_SERVER_URL {
+        infer_installed_mcp_config(args.agent)
+    } else {
+        None
+    };
+    let server_url = effective_hook_server_url(config, &args, inferred.as_ref());
     let auth_token_owned = args
         .auth_token
         .clone()
-        .or_else(|| config.auth.bearer_token.clone());
+        .or_else(|| config.auth.bearer_token.clone())
+        .or_else(|| inferred.as_ref().and_then(|mcp| mcp.auth_token.clone()));
     let auth = auth_token_owned.as_deref();
     if args.apply {
         return match args.agent {
-            AgentChoice::OpenCode => apply_to_opencode_plugin(&args.server_url, auth, &args),
-            AgentChoice::Omp => apply_to_omp_extension(&args.server_url, auth, &args),
+            AgentChoice::OpenCode => apply_to_opencode_plugin(&server_url, auth, &args),
+            AgentChoice::Omp => apply_to_omp_extension(&server_url, auth, &args),
             AgentChoice::ClaudeCode => {
                 let hooks_dir = resolve_hooks_dir(args.hooks_dir.as_deref(), args.agent)?;
-                apply_to_claude_code_settings(&hooks_dir, &args.server_url, auth, &args)
+                apply_to_claude_code_settings(&hooks_dir, &server_url, auth, &args)
             }
             AgentChoice::Codex => {
                 let hooks_dir = resolve_hooks_dir(args.hooks_dir.as_deref(), args.agent)?;
-                apply_to_codex_settings(&hooks_dir, &args.server_url, auth, &args)
+                apply_to_codex_settings(&hooks_dir, &server_url, auth, &args)
             }
             AgentChoice::Cursor => {
                 let hooks_dir = resolve_hooks_dir(args.hooks_dir.as_deref(), args.agent)?;
-                apply_to_cursor_settings(&hooks_dir, &args.server_url, auth, &args)
+                apply_to_cursor_settings(&hooks_dir, &server_url, auth, &args)
             }
             AgentChoice::GeminiCli => {
                 let hooks_dir = resolve_hooks_dir(args.hooks_dir.as_deref(), args.agent)?;
-                apply_to_gemini_settings(&hooks_dir, &args.server_url, auth, &args)
+                apply_to_gemini_settings(&hooks_dir, &server_url, auth, &args)
             }
             AgentChoice::AntigravityCli => {
                 let hooks_dir = resolve_hooks_dir(args.hooks_dir.as_deref(), args.agent)?;
-                apply_to_antigravity_settings(&hooks_dir, &args.server_url, auth, &args)
+                apply_to_antigravity_settings(&hooks_dir, &server_url, auth, &args)
             }
-            AgentChoice::Openclaw => openclaw_plugin::apply(&args.server_url, auth, &args),
+            AgentChoice::Openclaw => openclaw_plugin::apply(&server_url, auth, &args),
         };
     }
     match args.agent {
-        AgentChoice::OpenCode => render_opencode_plugin(&args.server_url, auth),
-        AgentChoice::Omp => render_omp_extension(&args.server_url, auth),
+        AgentChoice::OpenCode => render_opencode_plugin(&server_url, auth),
+        AgentChoice::Omp => render_omp_extension(&server_url, auth),
         AgentChoice::ClaudeCode => {
             let hooks_dir = resolve_hooks_dir(args.hooks_dir.as_deref(), args.agent)?;
-            render_claude_code(&hooks_dir, &args.server_url, auth)
+            render_claude_code(&hooks_dir, &server_url, auth)
         }
         AgentChoice::Codex => {
             let hooks_dir = resolve_hooks_dir(args.hooks_dir.as_deref(), args.agent)?;
-            render_agent("codex", &hooks_dir, &args.server_url, auth)
+            render_agent("codex", &hooks_dir, &server_url, auth)
         }
         AgentChoice::Cursor => {
             let hooks_dir = resolve_hooks_dir(args.hooks_dir.as_deref(), args.agent)?;
-            render_agent("cursor", &hooks_dir, &args.server_url, auth)
+            render_agent("cursor", &hooks_dir, &server_url, auth)
         }
         AgentChoice::GeminiCli => {
             let hooks_dir = resolve_hooks_dir(args.hooks_dir.as_deref(), args.agent)?;
-            render_agent("gemini-cli", &hooks_dir, &args.server_url, auth)
+            render_agent("gemini-cli", &hooks_dir, &server_url, auth)
         }
         AgentChoice::AntigravityCli => {
             let hooks_dir = resolve_hooks_dir(args.hooks_dir.as_deref(), args.agent)?;
-            render_agent("antigravity-cli", &hooks_dir, &args.server_url, auth)
+            render_agent("antigravity-cli", &hooks_dir, &server_url, auth)
         }
         AgentChoice::Openclaw => {
-            openclaw_plugin::render(&args.server_url, auth);
+            openclaw_plugin::render(&server_url, auth);
             Ok(())
         }
     }
+}
+
+#[derive(Debug, Clone, Default)]
+struct InferredMcpConfig {
+    hook_server_url: Option<String>,
+    auth_token: Option<String>,
+}
+
+fn effective_hook_server_url(
+    config: &Config,
+    args: &InstallHooksArgs,
+    inferred: Option<&InferredMcpConfig>,
+) -> String {
+    if args.server_url != DEFAULT_SERVER_URL {
+        return normalise_hook_server_url(&args.server_url);
+    }
+    if config.server_url_configured() {
+        return normalise_hook_server_url(&config.server_url);
+    }
+    if let Some(url) = inferred.and_then(|mcp| mcp.hook_server_url.clone()) {
+        return normalise_hook_server_url(&url);
+    }
+    args.server_url.clone()
+}
+
+fn normalise_hook_server_url(url: &str) -> String {
+    url.trim().trim_end_matches('/').to_string()
+}
+
+fn infer_installed_mcp_config(agent: AgentChoice) -> Option<InferredMcpConfig> {
+    let client = mcp_client_for_agent(agent)?;
+    let path = install_mcp::mcp_config_path(client).ok()?;
+    let content = fs::read_to_string(path).ok()?;
+    match client {
+        McpClient::ClaudeCode => {
+            infer_json_mcp_config(&content, &["mcpServers", "ai-memory"], "url")
+        }
+        McpClient::Codex => infer_codex_mcp_config(&content),
+        McpClient::OpenCode => infer_json_mcp_config(&content, &["mcp", "ai-memory"], "url"),
+        McpClient::Cursor => infer_json_mcp_config(&content, &["mcpServers", "ai-memory"], "url"),
+        McpClient::GeminiCli => {
+            infer_json_mcp_config(&content, &["mcpServers", "ai-memory"], "httpUrl")
+        }
+        McpClient::Openclaw => {
+            infer_json_mcp_config(&content, &["mcp", "servers", "ai-memory"], "url")
+        }
+        McpClient::Pi => infer_json_mcp_config(&content, &["mcpServers", "ai-memory"], "url"),
+        McpClient::AntigravityCli => {
+            infer_json_mcp_config(&content, &["mcpServers", "ai-memory"], "serverUrl")
+        }
+        McpClient::ClaudeDesktop => None,
+    }
+}
+
+fn mcp_client_for_agent(agent: AgentChoice) -> Option<McpClient> {
+    match agent {
+        AgentChoice::ClaudeCode => Some(McpClient::ClaudeCode),
+        AgentChoice::Codex => Some(McpClient::Codex),
+        AgentChoice::Cursor => Some(McpClient::Cursor),
+        AgentChoice::GeminiCli => Some(McpClient::GeminiCli),
+        AgentChoice::OpenCode => Some(McpClient::OpenCode),
+        AgentChoice::Omp => Some(McpClient::Pi),
+        AgentChoice::Openclaw => Some(McpClient::Openclaw),
+        AgentChoice::AntigravityCli => Some(McpClient::AntigravityCli),
+    }
+}
+
+fn infer_json_mcp_config(
+    content: &str,
+    entry_path: &[&str],
+    url_key: &str,
+) -> Option<InferredMcpConfig> {
+    let root: serde_json::Value = serde_json::from_str(content).ok()?;
+    let mut entry = &root;
+    for key in entry_path {
+        entry = entry.get(*key)?;
+    }
+    let hook_server_url = entry
+        .get(url_key)
+        .and_then(|v| v.as_str())
+        .and_then(hook_server_url_from_mcp_url);
+    let auth_token = entry
+        .get("headers")
+        .and_then(|headers| headers.get("Authorization"))
+        .and_then(|v| v.as_str())
+        .and_then(bearer_token_from_header);
+    Some(InferredMcpConfig {
+        hook_server_url,
+        auth_token,
+    })
+}
+
+fn infer_codex_mcp_config(content: &str) -> Option<InferredMcpConfig> {
+    let doc: toml_edit::DocumentMut = content.parse().ok()?;
+    let server = &doc["mcp_servers"]["ai-memory"];
+    let hook_server_url = server["url"]
+        .as_str()
+        .and_then(hook_server_url_from_mcp_url);
+    let auth_token = server["http_headers"]["Authorization"]
+        .as_str()
+        .or_else(|| server["headers"]["Authorization"].as_str())
+        .and_then(bearer_token_from_header);
+    if hook_server_url.is_none() && auth_token.is_none() {
+        return None;
+    }
+    Some(InferredMcpConfig {
+        hook_server_url,
+        auth_token,
+    })
+}
+
+fn hook_server_url_from_mcp_url(url: &str) -> Option<String> {
+    let trimmed = url.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.strip_suffix("/mcp").unwrap_or(trimmed).to_string())
+}
+
+fn bearer_token_from_header(header: &str) -> Option<String> {
+    header
+        .trim()
+        .strip_prefix("Bearer ")
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 /// Mutate `~/.claude/settings.json` in place: replace the seven hook
@@ -1383,6 +1517,104 @@ mod tests {
                 fs::set_permissions(&p, perms).unwrap();
             }
         }
+    }
+
+    fn default_hook_args() -> InstallHooksArgs {
+        InstallHooksArgs {
+            agent: AgentChoice::OpenCode,
+            hooks_dir: None,
+            server_url: DEFAULT_SERVER_URL.into(),
+            auth_token: None,
+            apply: true,
+            config_file: None,
+        }
+    }
+
+    #[test]
+    fn hook_server_url_defaults_to_configured_server_url() {
+        let config = Config {
+            server_url: "http://192.168.0.90:49374/".into(),
+            ..Config::default()
+        };
+        let args = default_hook_args();
+
+        assert_eq!(
+            effective_hook_server_url(&config, &args, None),
+            "http://192.168.0.90:49374"
+        );
+    }
+
+    #[test]
+    fn hook_server_url_explicit_flag_wins_over_config() {
+        let config = Config {
+            server_url: "http://homelab:49374".into(),
+            ..Config::default()
+        };
+        let mut args = default_hook_args();
+        args.server_url = "http://explicit:49374/".into();
+
+        assert_eq!(
+            effective_hook_server_url(&config, &args, None),
+            "http://explicit:49374"
+        );
+    }
+
+    #[test]
+    fn hook_server_url_falls_back_to_existing_mcp_entry() {
+        let config = Config::default();
+        let args = default_hook_args();
+        let inferred = InferredMcpConfig {
+            hook_server_url: Some("http://homelab:49374".into()),
+            auth_token: Some("tok".into()),
+        };
+
+        assert_eq!(
+            effective_hook_server_url(&config, &args, Some(&inferred)),
+            "http://homelab:49374"
+        );
+    }
+
+    #[test]
+    fn opencode_mcp_inference_supplies_hook_origin_and_token() {
+        let inferred = infer_json_mcp_config(
+            r#"{
+              "mcp": {
+                "ai-memory": {
+                  "type": "remote",
+                  "url": "http://homelab:49374/mcp",
+                  "headers": { "Authorization": "Bearer secret-token" }
+                }
+              }
+            }"#,
+            &["mcp", "ai-memory"],
+            "url",
+        )
+        .unwrap();
+
+        assert_eq!(
+            inferred.hook_server_url.as_deref(),
+            Some("http://homelab:49374")
+        );
+        assert_eq!(inferred.auth_token.as_deref(), Some("secret-token"));
+    }
+
+    #[test]
+    fn codex_mcp_inference_accepts_block_form_config() {
+        let inferred = infer_codex_mcp_config(
+            r#"[mcp_servers.ai-memory]
+url = "http://homelab:49374/mcp"
+
+[mcp_servers.ai-memory.http_headers]
+Authorization = "Bearer secret-token"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            inferred.hook_server_url.as_deref(),
+            Some("http://homelab:49374")
+        );
+        assert_eq!(inferred.auth_token.as_deref(), Some("secret-token"));
     }
 
     #[test]

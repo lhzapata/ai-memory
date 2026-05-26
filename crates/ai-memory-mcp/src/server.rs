@@ -5,11 +5,11 @@ use std::sync::Arc;
 
 use ai_memory_consolidate::{Consolidator, run_lint, run_sweep};
 use ai_memory_core::{
-    ActiveProject, AgentKind, NewHandoff, PageId, ProjectId, SessionId, WorkspaceId,
+    ActiveProject, AgentKind, NewHandoff, PageId, PagePath, ProjectId, SessionId, Tier, WorkspaceId,
 };
 use ai_memory_llm::{Embedder, LlmProvider};
 use ai_memory_store::{DecayParams, ReaderPool, WriterHandle};
-use ai_memory_wiki::Wiki;
+use ai_memory_wiki::{Wiki, WritePageRequest};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
@@ -26,8 +26,10 @@ use serde::{Deserialize, Serialize};
 pub const MEMORY_INSTRUCTIONS: &str = "\
 Long-term memory for the current project. Lifecycle hooks already \
 capture every prompt + tool call automatically — you do NOT need to \
-write anything by hand. Use these tools when the conversation calls \
-for them:\n\
+write routine notes by hand. When the user explicitly asks to remember \
+a permanent annotation/fact/rule, write a durable wiki page; do not use \
+a handoff for that. Use these tools when the conversation calls for \
+them:\n\
 \n\
 - `memory_query` — when the user references prior work you don't \
   recognise, or asks 'have we done / discussed X', or you're about \
@@ -56,6 +58,9 @@ for them:\n\
   put detail in open_questions + next_steps bullets.\n\
 - `memory_consolidate` — when the user asks to compile session \
   observations into wiki pages (usually automatic at session end).\n\
+- `memory_write_page` — when the user explicitly asks to remember, \
+  save, or annotate durable project knowledge. This writes a wiki page; \
+  do NOT use `memory_handoff_begin` for permanent annotations.\n\
 - `memory_lint` — when the user asks to audit the wiki for stale \
   pages, contradictions, or rule suggestions.\n\
 - `memory_forget_sweep` — when the user wants to prune old / cold \
@@ -253,6 +258,30 @@ struct ExploreArgs {
     #[serde(default)]
     recent_pages_limit: Option<usize>,
     /// Project to explore. Omit to target the project you're currently
+    /// working in (resolved from recent hook activity).
+    #[serde(default)]
+    project: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+struct WritePageArgs {
+    /// Relative wiki path to write, for example `notes/santander-2025.md`.
+    path: String,
+    /// Markdown body. Pass the durable fact/note content, not a handoff summary.
+    body: String,
+    /// Optional page title; otherwise derived from the first H1 or path stem.
+    #[serde(default)]
+    title: Option<String>,
+    /// Tier (`working`, `episodic`, `semantic`, `procedural`). Default semantic.
+    #[serde(default)]
+    tier: Option<String>,
+    /// Tags to attach to the page.
+    #[serde(default)]
+    tags: Vec<String>,
+    /// Pin the page so the decay sweep skips it.
+    #[serde(default)]
+    pinned: bool,
+    /// Project to write into. Omit to target the project you're currently
     /// working in (resolved from recent hook activity).
     #[serde(default)]
     project: Option<String>,
@@ -584,6 +613,78 @@ impl AiMemoryServer {
                 .map_err(|e| McpError::internal_error(e.to_string(), None))?;
             ok_json(&outcome)
         }
+    }
+
+    /// Write or update a durable wiki page.
+    #[tool(description = "Write or update a durable wiki page for the \
+        current project. Use this when the user explicitly asks to \
+        remember, save, pin, annotate, or make permanent a fact/rule/note. \
+        This is for long-lived project knowledge; do NOT use \
+        memory_handoff_begin for permanent annotations. Choose a stable \
+        relative path such as `notes/<topic>.md`, `concepts/<topic>.md`, \
+        `decisions/<topic>.md`, or `_rules/<topic>.md`. `tier` defaults \
+        to `semantic`; set `pinned=true` for facts that should never decay.")]
+    async fn memory_write_page(
+        &self,
+        Parameters(args): Parameters<WritePageArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let Some(wiki) = self.wiki.as_ref() else {
+            return Err(McpError::internal_error(
+                "memory_write_page requires the server to be built with a wiki handle",
+                None,
+            ));
+        };
+        let tier_name = args.tier.as_deref().unwrap_or("semantic");
+        let tier: Tier = tier_name
+            .parse()
+            .map_err(|_| McpError::internal_error(format!("unknown tier '{tier_name}'"), None))?;
+        let path = PagePath::new(args.path.clone())
+            .map_err(|e| McpError::internal_error(format!("invalid path: {e}"), None))?;
+        let (ws, proj) = self.effective_ids(args.project.as_deref()).await;
+
+        let mut fm = serde_json::Map::new();
+        if let Some(title) = &args.title {
+            fm.insert("title".into(), serde_json::Value::String(title.clone()));
+        }
+        if !args.tags.is_empty() {
+            fm.insert(
+                "tags".into(),
+                serde_json::Value::Array(
+                    args.tags
+                        .iter()
+                        .cloned()
+                        .map(serde_json::Value::String)
+                        .collect(),
+                ),
+            );
+        }
+        if args.pinned {
+            fm.insert("pinned".into(), serde_json::Value::Bool(true));
+        }
+        let frontmatter = if fm.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::Value::Object(fm)
+        };
+
+        let page_id = wiki
+            .write_page(WritePageRequest {
+                workspace_id: ws,
+                project_id: proj,
+                path: path.clone(),
+                frontmatter,
+                body: args.body,
+                tier,
+                pinned: args.pinned,
+                title: args.title,
+            })
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        ok_json(&serde_json::json!({
+            "page_id": page_id.to_string(),
+            "path": path.to_string()
+        }))
     }
 
     /// Create a handoff snapshot for the next agent CLI.
@@ -1009,6 +1110,53 @@ mod tests {
         let (_tmp, _store, _server, _ws, _pj) = setup_server().await;
     }
 
+    #[test]
+    fn prompts_cover_every_mcp_tool() {
+        let tools = [
+            "memory_query",
+            "memory_recent",
+            "memory_status",
+            "memory_briefing",
+            "memory_explore",
+            "memory_handoff_accept",
+            "memory_handoff_begin",
+            "memory_consolidate",
+            "memory_write_page",
+            "memory_lint",
+            "memory_forget_sweep",
+            "memory_install_self_routing",
+        ];
+        let routing = ai_memory_core::full_block();
+        for tool in tools {
+            assert!(
+                MEMORY_INSTRUCTIONS.contains(tool),
+                "MCP handshake instructions omit {tool}"
+            );
+            assert!(
+                routing.contains(tool),
+                "routing snippet omit {tool}; update ai_memory_core::SNIPPET_BODY"
+            );
+        }
+    }
+
+    #[test]
+    fn prompts_route_permanent_annotations_to_write_page_not_handoff() {
+        for prompt in [MEMORY_INSTRUCTIONS, ai_memory_core::SNIPPET_BODY] {
+            assert!(
+                prompt.contains("permanent") || prompt.contains("permanently"),
+                "prompt must mention permanent memory use cases"
+            );
+            assert!(
+                prompt.contains("memory_write_page"),
+                "prompt must expose memory_write_page"
+            );
+            assert!(
+                prompt.contains("do NOT use") || prompt.contains("do **not** use"),
+                "prompt must explicitly disallow handoffs for permanent notes"
+            );
+        }
+    }
+
     /// Read tools resolve the project in the order: explicit `project`
     /// arg → hook-published active project → baked-in default (issue #2).
     #[tokio::test]
@@ -1257,6 +1405,63 @@ mod tests {
             .map(|t| t.text.clone())
             .unwrap();
         assert!(text.contains("foo.md"), "expected hit; got {text}");
+    }
+
+    #[tokio::test]
+    async fn memory_write_page_writes_durable_page() {
+        let tmp = TempDir::new().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+        let ws = store
+            .writer
+            .get_or_create_workspace("default")
+            .await
+            .unwrap();
+        let proj = store
+            .writer
+            .get_or_create_project(ws, "scratch", None)
+            .await
+            .unwrap();
+        let wiki = Wiki::new(tmp.path(), store.writer.clone()).unwrap();
+        let server = AiMemoryServer::new(store.reader.clone(), store.writer.clone(), ws, proj)
+            .with_wiki(wiki);
+
+        let result = server
+            .memory_write_page(Parameters(WritePageArgs {
+                path: "notes/santander-2025.md".into(),
+                body: "# Santander 2025\n\nDurable tax annotation.".into(),
+                title: Some("Santander 2025".into()),
+                tier: Some("semantic".into()),
+                tags: vec!["finance".into()],
+                pinned: true,
+                project: None,
+            }))
+            .await
+            .unwrap();
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.as_text())
+            .map(|t| t.text.clone())
+            .unwrap();
+        assert!(text.contains("notes/santander-2025.md"), "got {text}");
+
+        let recent = server
+            .memory_recent(Parameters(RecentArgs {
+                limit: Some(5),
+                project: None,
+            }))
+            .await
+            .unwrap();
+        let recent_text = recent
+            .content
+            .first()
+            .and_then(|c| c.as_text())
+            .map(|t| t.text.clone())
+            .unwrap();
+        assert!(
+            recent_text.contains("notes/santander-2025.md"),
+            "write-page result must be visible to read tools; got {recent_text}"
+        );
     }
 
     /// `memory_handoff_begin` must resolve the same project as

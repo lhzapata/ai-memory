@@ -48,6 +48,7 @@ the wiki without you naming tools explicitly.
 | "Where did we leave off?" | Existing handoff block, or `memory_handoff_accept` if no block exists | Resumes from the latest pending handoff. |
 | "Save context for the next session" | `memory_handoff_begin` | Writes a terse handoff with open questions and next steps. |
 | "Consolidate this session" | `memory_consolidate` | Manually runs what session-end normally runs automatically. |
+| "Remember this permanently" / "add an annotation" | `memory_write_page` | Writes durable wiki knowledge; not a single-use handoff. |
 | "Audit the wiki" / "any contradictions?" | `memory_lint` | Runs stale-page, contradiction, and rule-suggestion checks. |
 | "How big is the wiki?" / "stats?" | `memory_status`, `memory_briefing` | Counts and recent activity windows. |
 

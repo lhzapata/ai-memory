@@ -6,7 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+- `memory_write_page` MCP tool for explicit durable annotations, so agents can
+  write permanent wiki knowledge without abusing single-use handoffs.
+
 ### Fixed
+- `install-mcp`, `install-hooks`, and `setup-agent` now honor configured
+  `AI_MEMORY_SERVER_URL` defaults; `install-hooks` also reuses an existing
+  ai-memory MCP entry when present, preventing remote MCP setups from
+  regenerating loopback-only lifecycle hooks during installs/upgrades.
 - Filesystem watcher now reindexes a project when backends report only a
   parent-directory event, improving external editor capture on macOS/FSEvents.
 - OpenAI strict structured-output schema normalization now strips generated

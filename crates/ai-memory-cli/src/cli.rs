@@ -287,7 +287,8 @@ pub struct SetupAgentArgs {
     ///     --to /host/hooks  --host-prefix $HOME/.ai-memory/hooks
     #[arg(long)]
     pub host_prefix: Option<PathBuf>,
-    /// MCP / hook ingress URL the agent should POST to.
+    /// MCP / hook ingress URL the agent should POST to. Defaults to the
+    /// configured `server_url` / AI_MEMORY_SERVER_URL when set, else loopback.
     #[arg(long, default_value_t = crate::config::DEFAULT_SERVER_URL.to_string())]
     pub server_url: String,
     /// Bearer token embedded into each hook's env block. When omitted,
@@ -552,7 +553,10 @@ pub struct InstallHooksArgs {
     /// Ignored for generated TypeScript integrations (OpenCode, OMP, OpenClaw).
     #[arg(long)]
     pub hooks_dir: Option<PathBuf>,
-    /// Server URL the hooks will POST to.
+    /// Server URL the hooks will POST to. Defaults to the configured
+    /// `server_url` / AI_MEMORY_SERVER_URL when set, else loopback. If neither
+    /// is configured, apply-mode also reuses an existing ai-memory MCP entry
+    /// for the same agent when one is present.
     #[arg(long, default_value_t = crate::config::DEFAULT_SERVER_URL.to_string())]
     pub server_url: String,
     /// Bearer token to embed in the hook config's `env` block. When
@@ -580,7 +584,9 @@ pub struct InstallMcpArgs {
     /// Which MCP client to render configuration for.
     #[arg(long, value_enum, default_value_t = McpClient::ClaudeCode)]
     pub client: McpClient,
-    /// MCP HTTP endpoint URL the client should connect to.
+    /// MCP HTTP endpoint URL the client should connect to. Defaults to the
+    /// configured `server_url` / AI_MEMORY_SERVER_URL plus `/mcp` when set,
+    /// else loopback.
     #[arg(long, default_value_t = crate::config::DEFAULT_MCP_URL.to_string())]
     pub server_url: String,
     /// Friendly name the client should show for this server entry.

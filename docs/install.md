@@ -56,14 +56,14 @@ required for any non-loopback bind.
 export AI_MEMORY_SERVER_URL="http://<server-ip>:49374"
 export AI_MEMORY_AUTH_TOKEN="$TOKEN"
 
-ai-memory install-mcp   --client claude-code --apply \
-    --server-url "http://<server-ip>:49374/mcp"
-ai-memory install-hooks --agent  claude-code --apply \
-    --server-url "http://<server-ip>:49374"
+ai-memory install-mcp   --client claude-code --apply
+ai-memory install-hooks --agent  claude-code --apply
 ```
 
 The CLI commands (`bootstrap`, `status`, `search`, `lint`, etc.) inherit the
-two env vars automatically.
+two env vars automatically. So do `install-mcp`, `install-hooks`, and
+`setup-agent`: with `AI_MEMORY_SERVER_URL` set, `install-mcp` derives the
+`/mcp` endpoint and `install-hooks` uses the bare server origin.
 
 ---
 
@@ -88,14 +88,18 @@ export AI_MEMORY_SERVER_URL="http://192.168.0.90:49374"
 export AI_MEMORY_AUTH_TOKEN="<token>"
 ```
 
-Explicit `--server-url` and `--auth-token` flags on `install-mcp` and
-`install-hooks` override the environment. That is useful when you are
-generating config for a client that talks to a different server than
-your default CLI target.
+Explicit `--server-url` and `--auth-token` flags on `install-mcp`,
+`install-hooks`, and `setup-agent` override the environment. That is
+useful when you are generating config for a client that talks to a
+different server than your default CLI target.
 
-`init`, `serve`, `install-*`, `generate-auth-token`, and `setup-agent`
-do not need these env vars because they either set up local files or
-start the server itself.
+If you run `install-mcp --apply` first and later run `install-hooks --apply`
+without env vars or flags, hooks reuse the existing ai-memory MCP entry for
+that agent when possible. This keeps remote MCP config and lifecycle capture
+pointed at the same server instead of falling back to loopback.
+
+`init`, `serve`, and `generate-auth-token` do not need these env vars because
+they either create local files or start the server itself.
 
 ---
 

@@ -126,6 +126,7 @@ cmd_upgrade() {
       # the seven hook keys we own get replaced; everything else
       # (other hooks the user wired up) survives untouched.
       echo "    ai-memory install-hooks --agent ${agent} --apply"
+      echo "      (uses AI_MEMORY_SERVER_URL/AI_MEMORY_AUTH_TOKEN or the existing ai-memory MCP entry when present)"
       AI_MEMORY_NO_VERSION_CHECK=1 \
       "$0" install-hooks --agent "${agent}" --apply \
         || echo "      (skipped — re-run with the same --server-url / --auth-token used originally)"

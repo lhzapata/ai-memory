@@ -167,15 +167,18 @@ On Linux/macOS, that's it. Start a Claude Code session as usual - every
 prompt and tool call now lands in ai-memory, and the next session you
 open in this project will see a handoff with where you left off.
 
-The `install-mcp` / `install-hooks` commands default to
-`http://127.0.0.1:49374` (matching the server above) and no bearer
-token. Both are idempotent - re-runs replace ai-memory's entry,
-preserve every other server / hook you have configured, and write a
-timestamped `.bak-<ts>` next to the file before each modifying
-write. The hook scripts are staged into
-`~/.local/share/ai-memory/hooks/<agent>/` automatically; re-running
-overwrites them so future image updates ship updated hooks. Drop
-`--apply` to print the snippet instead of mutating.
+The `install-mcp` / `install-hooks` commands use
+`AI_MEMORY_SERVER_URL` / `AI_MEMORY_AUTH_TOKEN` when set; otherwise
+they default to `http://127.0.0.1:49374` (matching the server above)
+and no bearer token. If hooks are installed after an ai-memory MCP
+entry already exists, `install-hooks` reuses that endpoint so a remote
+MCP setup cannot silently regenerate loopback-only hooks. Both commands
+are idempotent - re-runs replace ai-memory's entry, preserve every
+other server / hook you have configured, and write a timestamped
+`.bak-<ts>` next to the file before each modifying write. The hook
+scripts are staged into `~/.local/share/ai-memory/hooks/<agent>/`
+automatically; re-running overwrites them so future image updates ship
+updated hooks. Drop `--apply` to print the snippet instead of mutating.
 
 The Docker wrapper also bridges thin-client commands such as
 `ai-memory status` and `ai-memory bootstrap` back to the host's
@@ -196,8 +199,10 @@ use `--mcp-url` if you installed MCP with a custom endpoint, and
 - **Docker compose:** `docker compose -f docker/docker-compose.yml up -d`
   is supported; agent setup is the same as step 3 above.
 - **Remote server:** set `AI_MEMORY_SERVER_URL=http://<server-ip>:49374`
-  on the client and pass matching `--server-url` flags when installing
-  MCP/hooks. Any non-loopback server should use bearer auth.
+  and `AI_MEMORY_AUTH_TOKEN=<token>` on the client before installing
+  MCP/hooks. Explicit `--server-url` flags still work, but are no longer
+  required when the env vars are set. Any non-loopback server should use
+  bearer auth.
 - **Upgrades:** run `ai-memory upgrade` to refresh the wrapper, image,
   and staged hook scripts. Redeploy remote servers separately.
 

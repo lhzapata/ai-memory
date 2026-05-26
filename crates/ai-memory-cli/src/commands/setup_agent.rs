@@ -38,7 +38,7 @@ use crate::cli::{AgentChoice, SetupAgentArgs};
 use crate::commands::render_shared::{
     CLAUDE_CODE_EVENTS, build_claude_code_payload, hook_script_for_current_platform,
 };
-use crate::config::Config;
+use crate::config::{Config, DEFAULT_SERVER_URL};
 
 /// Run the `setup-agent` subcommand.
 ///
@@ -47,7 +47,13 @@ use crate::config::Config;
 /// destination directory can't be created, any script copy fails,
 /// or the JSON config can't be serialised.
 pub fn run(config: &Config, args: SetupAgentArgs) -> Result<()> {
+    let server_url = if args.server_url == DEFAULT_SERVER_URL && config.server_url_configured() {
+        normalise_hook_server_url(&config.server_url)
+    } else {
+        normalise_hook_server_url(&args.server_url)
+    };
     let args = SetupAgentArgs {
+        server_url,
         auth_token: args.auth_token.or_else(|| config.auth.bearer_token.clone()),
         ..args
     };
@@ -134,6 +140,10 @@ pub fn run(config: &Config, args: SetupAgentArgs) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn normalise_hook_server_url(url: &str) -> String {
+    url.trim().trim_end_matches('/').to_string()
 }
 
 fn emit_extension_setup_hint(args: &SetupAgentArgs) {
