@@ -8,8 +8,8 @@
 
 A self-contained Rust binary that:
 
-1. Runs as an **MCP server** (stdio + HTTP/SSE) for coding-agent CLIs (Claude Code, OpenAI Codex, Cursor, Gemini CLI, OpenClaw, OpenCode, OMP, and MCP-capable clients).
-2. Captures the agent's session **automatically** - no `write_note` ceremony - via hook scripts or generated extensions that the agent CLIs invoke (Claude Code / Codex / Cursor / Gemini CLI lifecycle hooks, OpenClaw / OpenCode / OMP TypeScript integrations). Optional transcript-tail fallback for agents without hook APIs.
+1. Runs as an **MCP server** (stdio + HTTP/SSE) for coding-agent CLIs (Claude Code, OpenAI Codex, Cursor, Gemini CLI, Antigravity CLI, OpenClaw, OpenCode, OMP, and MCP-capable clients).
+2. Captures the agent's session **automatically** - no `write_note` ceremony - via hook scripts or generated extensions that the agent CLIs invoke (Claude Code / Codex / Cursor / Gemini CLI / Antigravity CLI lifecycle hooks, OpenClaw / OpenCode / OMP TypeScript integrations). Optional transcript-tail fallback for agents without hook APIs.
 3. Maintains a **Karpathy-style wiki**: incrementally-compiled markdown pages with cross-links, supersession, an `index.md` and a `log.md`.
 4. Serves retrieval via the MCP `tools/list` to coding agents: a handful of *narrow* tools, not 50.
 5. Ships a **Docker image** (`docker run -v ai-memory-data:/data -p 49374:49374 ai-memory`) so it can move between desktop and homelab.
@@ -80,7 +80,7 @@ Why not LanceDB/Qdrant/Kuzu/CozoDB/SurrealDB?
 
 **Embeddings:**
 - Default: **local model via `ort` (ONNX Runtime) crate or `fastembed-rs`** running `bge-small-en-v1.5` (384 dim) or `bge-small-en-v1.5-q` quantized. Same model basic-memory uses.
-- Persist `{provider, model, dim}` next to every vector. Refuse to load on mismatch with clear remediation (agentmemory #469 lesson).
+- Persist `{provider, model, dim}` next to every vector. On mismatch, warn and ignore stale vectors until `ai-memory embed --force` or scheduled backfill re-embeds them (agentmemory #469 lesson, without blocking startup).
 - Cache path: `<data_dir>/models/`, never `/tmp` (basic-memory #741).
 - Trait-based: `trait Embedder { ... }` with implementations `LocalOrtEmbedder`, `OpenAIEmbedder`, `VoyageEmbedder`. User configures one.
 
@@ -95,7 +95,7 @@ Why not LanceDB/Qdrant/Kuzu/CozoDB/SurrealDB?
 
 Three capture surfaces, in priority order:
 
-1. **Lifecycle hooks/extensions** (Claude Code, Codex, OpenCode, OMP). These are fast, reliable, structured. We ship hook scripts or generated TypeScript integrations the user installs once. Lessons from agentmemory:
+1. **Lifecycle hooks/extensions** (Claude Code, Codex, Cursor, Gemini CLI, Antigravity CLI, OpenClaw, OpenCode, OMP). These are fast, reliable, structured. We ship hook scripts or generated TypeScript integrations the user installs once. Lessons from agentmemory:
   - Hooks must be **fire-and-forget** (#221). No `await fetch()` blocking session start.
   - Sub-second hard timeouts on the writer side (`tokio::time::timeout`).
   - All hooks → single HTTP/Unix-socket POST → server queues → returns 202

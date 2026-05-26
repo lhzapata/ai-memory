@@ -90,7 +90,7 @@ curl -sI http://homelab:49374/handoff \
 **Then update every MCP client** to send the same token. `ai-memory
 install-mcp --client <name> --auth-token <token>` prints the exact
 snippet per client (Claude Code, Codex, OpenCode, Cursor, Claude
-Desktop, Gemini CLI, OpenClaw). The agent CLI sends an
+Desktop, Gemini CLI, OpenClaw, OMP/Pi, Antigravity CLI). The agent CLI sends an
 `Authorization: Bearer <token>` header on every call; ai-memory's
 middleware validates with a constant-time comparison.
 

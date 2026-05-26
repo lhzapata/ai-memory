@@ -429,7 +429,7 @@ fn hook_command(
             if let Some(t) = auth_token {
                 prefix.push_str(&format!("AI_MEMORY_AUTH_TOKEN={} ", shell_quote(t)));
             }
-            format!("{prefix}{}", script.to_string_lossy())
+            format!("{prefix}{}", shell_quote(&script.to_string_lossy()))
         }
         HookCommandPlatform::Windows => {
             let mut setup = format!("$env:AI_MEMORY_HOOK_URL={}", powershell_quote(server_url));
@@ -447,12 +447,15 @@ fn hook_command(
     }
 }
 
-/// Minimal shell quoting for embedding values into a `VAR=val cmd`
-/// prefix. Wraps in single quotes; embedded `'` is escaped via
-/// `'\''`. Safe for the URLs and bearer tokens we embed (no
-/// realistic value contains anything else weird).
+/// Minimal shell quoting for embedding values into a `VAR=val cmd` prefix or
+/// command path. Leaves only conservative shell-safe characters unquoted;
+/// wraps everything else in single quotes and escapes embedded `'` via
+/// `'\''`.
 fn shell_quote(s: &str) -> String {
-    if !s.contains(['\'', ' ', '"', '$', '`', '\\']) {
+    if s.chars().all(|c| {
+        c.is_ascii_alphanumeric()
+            || matches!(c, '-' | '_' | '.' | '/' | ':' | '@' | '%' | '+' | '=' | ',')
+    }) {
         return s.to_string();
     }
     let escaped = s.replace('\'', "'\\''");
@@ -686,6 +689,29 @@ mod tests {
         assert!(
             cmd.ends_with(&expected),
             "command should end with the absolute script path: {cmd}"
+        );
+    }
+
+    #[test]
+    fn posix_hook_command_quotes_script_path_and_shell_metachars() {
+        let cmd = hook_command(
+            &PathBuf::from("/tmp/hooks dir/session-start.sh"),
+            "http://localhost:49374/mcp?x=1&y=2",
+            Some("tok;rm -rf /"),
+            HookCommandPlatform::Posix,
+        );
+
+        assert!(
+            cmd.contains("AI_MEMORY_HOOK_URL='http://localhost:49374/mcp?x=1&y=2'"),
+            "URL with query metacharacters must be quoted: {cmd}"
+        );
+        assert!(
+            cmd.contains("AI_MEMORY_AUTH_TOKEN='tok;rm -rf /'"),
+            "token with shell metacharacters must be quoted: {cmd}"
+        );
+        assert!(
+            cmd.ends_with("'/tmp/hooks dir/session-start.sh'"),
+            "script path with spaces must be quoted: {cmd}"
         );
     }
 

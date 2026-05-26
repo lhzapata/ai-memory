@@ -418,23 +418,26 @@ struct HookRemoval {
     removed_events: Vec<String>,
 }
 
-/// An entry (one element of an event's array) is ai-memory's when its
-/// command carries the signature — at the entry level (Flat shape) or
-/// inside its nested `hooks` array (Nested shape).
-fn hook_entry_is_ours(entry: &serde_json::Value) -> bool {
+/// Remove ai-memory commands from one hook entry. Returns `(removed_any,
+/// remove_entry)`. Flat entries are removed whole; nested entries only lose the
+/// matching inner commands and survive when third-party inner hooks remain.
+fn strip_hook_entry(entry: &mut serde_json::Value) -> (bool, bool) {
     if let Some(cmd) = entry.get("command").and_then(|c| c.as_str())
         && hook_command_is_ours(cmd)
     {
-        return true;
+        return (true, true);
     }
-    if let Some(inner) = entry.get("hooks").and_then(|h| h.as_array()) {
-        return inner.iter().any(|h| {
-            h.get("command")
+    if let Some(inner) = entry.get_mut("hooks").and_then(|h| h.as_array_mut()) {
+        let before = inner.len();
+        inner.retain(|h| {
+            !h.get("command")
                 .and_then(|c| c.as_str())
                 .is_some_and(hook_command_is_ours)
         });
+        let removed = inner.len() != before;
+        return (removed, inner.is_empty());
     }
-    false
+    (false, false)
 }
 
 /// Remove ai-memory hook entries from a settings/hooks JSON document.
@@ -453,9 +456,13 @@ fn strip_ai_memory_hooks(content: &str) -> Result<HookRemoval> {
             let Some(arr) = hooks.get_mut(&event).and_then(|v| v.as_array_mut()) else {
                 continue;
             };
-            let before = arr.len();
-            arr.retain(|entry| !hook_entry_is_ours(entry));
-            if arr.len() != before {
+            let mut removed_from_event = false;
+            arr.retain_mut(|entry| {
+                let (removed, remove_entry) = strip_hook_entry(entry);
+                removed_from_event |= removed;
+                !remove_entry
+            });
+            if removed_from_event {
                 removed_events.push(event.clone());
             }
             if arr.is_empty() {
@@ -487,9 +494,13 @@ fn strip_antigravity_hooks(content: &str) -> Result<HookRemoval> {
             let Some(arr) = group.get_mut(&event).and_then(|v| v.as_array_mut()) else {
                 continue;
             };
-            let before = arr.len();
-            arr.retain(|entry| !hook_entry_is_ours(entry));
-            if arr.len() != before {
+            let mut removed_from_event = false;
+            arr.retain_mut(|entry| {
+                let (removed, remove_entry) = strip_hook_entry(entry);
+                removed_from_event |= removed;
+                !remove_entry
+            });
+            if removed_from_event {
                 removed_events.push(format!("ai-memory.{event}"));
             }
             if arr.is_empty() {
@@ -525,8 +536,36 @@ fn generated_file_is_ours(path: &Path, kind: DeleteKind) -> bool {
                 && content.contains("definePluginEntry")
                 && content.contains("id: \"ai-memory\"")
         }
-        DeleteKind::OpenClawPackageJson => content == openclaw_plugin::package_json(),
-        DeleteKind::OpenClawManifest => content == openclaw_plugin::manifest_json(),
+        DeleteKind::OpenClawPackageJson => serde_json::from_str::<serde_json::Value>(&content)
+            .ok()
+            .is_some_and(|v| {
+                v.get("name").and_then(|name| name.as_str()) == Some(openclaw_plugin::PACKAGE_NAME)
+                    && v.get("private").and_then(|private| private.as_bool()) == Some(true)
+                    && v.get("type").and_then(|ty| ty.as_str()) == Some("module")
+                    && v.pointer("/openclaw/extensions")
+                        .and_then(|extensions| extensions.as_array())
+                        .is_some_and(|extensions| {
+                            extensions.len() == 1
+                                && extensions[0].as_str()
+                                    == Some(&format!("./{}", openclaw_plugin::ENTRYPOINT_TS))
+                        })
+            }),
+        DeleteKind::OpenClawManifest => serde_json::from_str::<serde_json::Value>(&content)
+            .ok()
+            .is_some_and(|v| {
+                v.get("id").and_then(|id| id.as_str()) == Some(openclaw_plugin::PLUGIN_ID)
+                    && v.get("name").and_then(|name| name.as_str()) == Some("ai-memory")
+                    && v.pointer("/activation/onCapabilities")
+                        .and_then(|capabilities| capabilities.as_array())
+                        .is_some_and(|capabilities| {
+                            capabilities
+                                .iter()
+                                .any(|entry| entry.as_str() == Some("hook"))
+                        })
+                    && v.pointer("/configSchema/additionalProperties")
+                        .and_then(|additional| additional.as_bool())
+                        == Some(false)
+            }),
     }
 }
 
@@ -619,23 +658,52 @@ fn strip_mcp_json(
 /// Remove ai-memory's Codex MCP table by name or `url`. Returns new
 /// content and removed names. Preserves comments + other tables.
 fn strip_mcp_toml(content: &str, name: Option<&str>, url: &str) -> Result<(String, Vec<String>)> {
+    use toml_edit::{Item, Value};
+
     let mut removed = Vec::new();
     let new_content = mutate_toml(content, |doc| {
-        let Some(servers) = doc.get_mut("mcp_servers").and_then(|i| i.as_table_mut()) else {
+        let Some(servers_item) = doc.get_mut("mcp_servers") else {
             return Ok(());
         };
-        let keys: Vec<String> = servers.iter().map(|(k, _)| k.to_string()).collect();
-        for k in keys {
-            let matches_url = servers
-                .get(&k)
-                .and_then(|item| item.as_table())
-                .and_then(|t| t.get("url"))
-                .and_then(|u| u.as_str())
-                == Some(url);
-            if name.is_none_or(|name| k == name) && matches_url {
-                servers.remove(&k);
-                removed.push(k);
+        let mut remove_mcp_servers = false;
+        match servers_item {
+            Item::Table(servers) => {
+                let keys: Vec<String> = servers.iter().map(|(k, _)| k.to_string()).collect();
+                for k in keys {
+                    let matches_url = servers
+                        .get(&k)
+                        .and_then(|item| item.as_table())
+                        .and_then(|t| t.get("url"))
+                        .and_then(|u| u.as_str())
+                        == Some(url);
+                    if name.is_none_or(|name| k == name) && matches_url {
+                        servers.remove(&k);
+                        removed.push(k);
+                    }
+                }
             }
+            Item::Value(Value::InlineTable(servers)) => {
+                let keys: Vec<String> = servers.iter().map(|(k, _)| k.to_string()).collect();
+                for k in keys {
+                    let matches_url = servers
+                        .get(&k)
+                        .and_then(|value| value.as_inline_table())
+                        .and_then(|table| table.get("url"))
+                        .and_then(|value| value.as_str())
+                        == Some(url);
+                    if name.is_none_or(|name| k == name) && matches_url {
+                        servers.remove(&k);
+                        removed.push(k);
+                    }
+                }
+                if servers.is_empty() {
+                    remove_mcp_servers = true;
+                }
+            }
+            _ => {}
+        }
+        if remove_mcp_servers {
+            doc.remove("mcp_servers");
         }
         Ok(())
     })?;
@@ -765,6 +833,30 @@ mod tests {
     }
 
     #[test]
+    fn strip_hooks_nested_mixed_inner_commands_preserves_user_hook() {
+        let content = r#"{
+      "hooks": {
+        "Stop": [
+          {"matcher":"","hooks":[
+            {"type":"command","command":"AI_MEMORY_HOOK_URL=x /a/stop.sh"},
+            {"type":"command","command":"/home/u/scripts/my-stop.sh"}
+          ]}
+        ]
+      }
+    }"#;
+
+        let out = strip_ai_memory_hooks(content).unwrap();
+        assert_eq!(out.removed_events, vec!["Stop".to_string()]);
+        let v: serde_json::Value = serde_json::from_str(&out.new_content).unwrap();
+        let inner = v["hooks"]["Stop"][0]["hooks"].as_array().unwrap();
+        assert_eq!(inner.len(), 1, "third-party inner hook must survive");
+        assert_eq!(
+            inner[0]["command"].as_str(),
+            Some("/home/u/scripts/my-stop.sh")
+        );
+    }
+
+    #[test]
     fn strip_hooks_no_hooks_key_is_noop() {
         let content = r#"{"unrelated":true}"#;
         let out = strip_ai_memory_hooks(content).unwrap();
@@ -803,6 +895,27 @@ mod tests {
     }
 
     #[test]
+    fn strip_antigravity_hooks_preserves_mixed_nested_user_hook() {
+        let content = r#"{
+          "ai-memory": {
+            "Stop": [
+              {"matcher":"","hooks":[
+                {"type":"command","command":"AI_MEMORY_HOOK_URL=http://h /x/stop.sh"},
+                {"type":"command","command":"/usr/bin/user-stop"}
+              ]}
+            ]
+          }
+        }"#;
+
+        let out = strip_antigravity_hooks(content).unwrap();
+        assert_eq!(out.removed_events, vec!["ai-memory.Stop".to_string()]);
+        let v: serde_json::Value = serde_json::from_str(&out.new_content).unwrap();
+        let inner = v["ai-memory"]["Stop"][0]["hooks"].as_array().unwrap();
+        assert_eq!(inner.len(), 1);
+        assert_eq!(inner[0]["command"].as_str(), Some("/usr/bin/user-stop"));
+    }
+
+    #[test]
     fn generated_file_detection_rejects_user_files_at_ours_path() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("ai-memory.ts");
@@ -834,10 +947,20 @@ mod tests {
             &path,
             DeleteKind::OpenClawPackageJson
         ));
+
+        std::fs::write(
+            &path,
+            r#"{"name":"@ai-memory/openclaw-plugin","version":"0.0.1","private":true,"type":"module","openclaw":{"extensions":["./index.ts"]}}"#,
+        )
+        .unwrap();
+        assert!(
+            generated_file_is_ours(&path, DeleteKind::OpenClawPackageJson),
+            "older generated package versions should still uninstall"
+        );
     }
 
     #[test]
-    fn generated_openclaw_manifest_detection_requires_exact_metadata() {
+    fn generated_openclaw_manifest_detection_requires_our_shape() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("openclaw.plugin.json");
         std::fs::write(
@@ -850,6 +973,16 @@ mod tests {
 
         std::fs::write(&path, openclaw_plugin::manifest_json()).unwrap();
         assert!(generated_file_is_ours(&path, DeleteKind::OpenClawManifest));
+
+        std::fs::write(
+            &path,
+            r#"{"id":"ai-memory","name":"ai-memory","description":"older generated text","activation":{"onCapabilities":["hook"]},"configSchema":{"type":"object","additionalProperties":false,"properties":{}}}"#,
+        )
+        .unwrap();
+        assert!(
+            generated_file_is_ours(&path, DeleteKind::OpenClawManifest),
+            "older generated manifest descriptions should still uninstall"
+        );
     }
 
     #[test]
@@ -997,6 +1130,23 @@ mod tests {
         let (out, removed) = strip_mcp_toml(content, None, "http://127.0.0.1:49374/mcp").unwrap();
         assert_eq!(removed, vec!["custom".to_string()]);
         assert!(!out.contains("custom"));
+    }
+
+    #[test]
+    fn strip_mcp_toml_inline_table_by_url_under_custom_name() {
+        let content = "mcp_servers = { custom = { url = \"http://127.0.0.1:49374/mcp\" }, other = { url = \"http://x\" } }\n";
+        let (out, removed) = strip_mcp_toml(content, None, "http://127.0.0.1:49374/mcp").unwrap();
+        assert_eq!(removed, vec!["custom".to_string()]);
+        assert!(!out.contains("custom"));
+        assert!(out.contains("other"));
+    }
+
+    #[test]
+    fn strip_mcp_toml_inline_table_prunes_when_empty() {
+        let content = "mcp_servers = { ai-memory = { url = \"http://127.0.0.1:49374/mcp\" } }\n";
+        let (out, removed) = strip_mcp_toml(content, None, "http://127.0.0.1:49374/mcp").unwrap();
+        assert_eq!(removed, vec!["ai-memory".to_string()]);
+        assert!(!out.contains("mcp_servers"));
     }
 
     #[test]

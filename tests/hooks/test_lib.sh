@@ -78,7 +78,7 @@ QS2=$(ai_memory_marker_qs "$TMP/a/b/c")
 assert_eq "closer marker wins" "&cwd=$TMP/a/b/c&workspace=ws1&project=p1&project_strategy=repo-root" "$QS2"
 
 QS3=$(ai_memory_marker_qs "$TMP/nonexistent")
-assert_eq "no marker -> empty qs" "" "$QS3"
+assert_eq "no marker -> cwd only" "&cwd=$TMP/nonexistent" "$QS3"
 
 # --- url_encode -------------------------------------------------------
 assert_eq "url_encode passes safe slug"   "movvia" "$(ai_memory_url_encode "movvia")"

@@ -52,6 +52,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hook events.
 - README support matrix for operating systems, agent integrations, LLM
   providers, and embedding providers.
+- `ai-memory uninstall` — removes ai-memory's hooks, MCP registration, and
+  CLAUDE.md/AGENTS.md instruction block across all detected agents (dry-run by
+  default; `--apply` to execute, with timestamped backups). `--purge-data`
+  wipes wiki/db/raw via the reset guard. `--only hooks|mcp|instructions` to
+  narrow. MCP matching is endpoint-based by default; pass `--mcp-url` when the
+  server was installed with a custom endpoint and `--mcp-name` only to narrow
+  removal to one matching entry. Docker/volume teardown is printed as a hint,
+  not executed.
 
 ### Changed
 - Same-body page upserts are now true no-ops, avoiding periodic watcher
@@ -71,6 +79,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   updated Cursor / Claude Desktop / OpenClaw support docs against current
   upstream MCP and hook documentation.
 - Docker images now bundle both POSIX and PowerShell hook scripts.
+- `ai-memory uninstall --purge-data` now previews the `wiki/`/`db/`/`raw/`
+  wipe in dry-run (mirroring `reset`) and refuses **up front** if an
+  `ai-memory` process is alive (all-or-nothing) instead of removing the
+  wiring and then skipping the purge. The data wipe is now shared with
+  `reset` via a single internal helper.
+- `ai-memory uninstall` only deletes generated plugin/extension files after
+  re-validating their ai-memory-generated content, and never treats a matching
+  filename or MCP server name alone as proof of ownership.
 
 ### Fixed
 - `serve` now warns and starts when stored embedding rows were created with a
@@ -104,26 +120,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hook routing now evicts a stale project-cache entry and retries once when a
   live server sees a cached project deleted underneath it, such as after
   `purge-project`, so capture resumes without restarting the server.
-
-### Added
-- `ai-memory uninstall` — removes ai-memory's hooks, MCP registration, and
-  CLAUDE.md/AGENTS.md instruction block across all detected agents (dry-run by
-  default; `--apply` to execute, with timestamped backups). `--purge-data`
-  wipes wiki/db/raw via the reset guard. `--only hooks|mcp|instructions` to
-  narrow. MCP matching is endpoint-based by default; pass `--mcp-url` when the
-  server was installed with a custom endpoint and `--mcp-name` only to narrow
-  removal to one matching entry. Docker/volume teardown is printed as a hint,
-  not executed.
-
-### Changed
-- `ai-memory uninstall --purge-data` now previews the `wiki/`/`db/`/`raw/`
-  wipe in dry-run (mirroring `reset`) and refuses **up front** if an
-  `ai-memory` process is alive (all-or-nothing) instead of removing the
-  wiring and then skipping the purge. The data wipe is now shared with
-  `reset` via a single internal helper.
-- `ai-memory uninstall` only deletes generated plugin/extension files after
-  re-validating their ai-memory-generated content, and never treats a matching
-  filename or MCP server name alone as proof of ownership.
+- Session-start handoff hooks now include `cwd` even without a marker file, so
+  default `project = basename(cwd)` projects receive pending handoffs without
+  requiring `.ai-memory.toml`.
+- `ai-memory uninstall` now removes only ai-memory commands from mixed nested
+  hook entries, preserves third-party commands in the same matcher, and removes
+  legacy Codex inline-table MCP entries.
+- Generated POSIX hook commands now shell-quote script paths and env values
+  with metacharacters, fixing custom hook directories containing spaces and
+  preventing shell-active token/URL fragments.
+- OpenClaw's generated plugin now forwards marker-file routing params just like
+  the OpenCode and OMP generated integrations.
 
 ## [0.1.3] - 2026-05-24
 

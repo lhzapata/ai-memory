@@ -225,15 +225,17 @@ MCP parameter aliases are intentionally sparse: `memory_query.query` accepts
 `q|search`, and limit fields accept `n` / `top_k` where shipped. Project and
 cwd parameters use their canonical names.
 
-## CLI subcommand surface (17 commands)
+## CLI subcommand surface
 
 ```
-init               watch              embed
-status             serve              forget-sweep
-search             reset              lint
-write-page         backup             commit
-                   restore            llm-test
-                   install-hooks
+init                 status               search
+write-page           serve                reset
+backup               restore              install-hooks
+install-mcp          commit               llm-test
+forget-sweep         lint                 embed
+generate-auth-token  setup-agent          bootstrap
+install-instructions reorg                purge-project
+rename-project       uninstall
 ```
 
 Run `ai-memory --help` for the full tree.
@@ -261,7 +263,8 @@ that touch the relevant area.
    modes; no XML, no Instructor wrapping. (agentmemory #492 / #539,
    cognee #2840.)
 8. **`{provider, model, dim}` denormalised next to every embedding.**
-   Refuse-on-mismatch at startup. (agentmemory #469.)
+   Warn and ignore stale vectors on mismatch until re-embedding completes.
+   (agentmemory #469.)
 9. **Live-process check before destructive ops.** `ai-memory reset`,
    `backup`, `restore` all consult `sysinfo`. (basic-memory #765.)
 10. **Atomic file writes** (tmp + rename + fsync). Watcher ignores

@@ -7,8 +7,8 @@
 #    human in the loop.
 #
 # Walks up from the payload's cwd for a .ai-memory.toml marker file
-# and appends marker query params to both URLs when found — so a
-# session resuming under marker-declared routing doesn't query the
+# and appends cwd plus marker query params to both URLs — so a session
+# resuming under basename or marker-declared routing doesn't query the
 # wrong bucket and miss its own handoff.
 # At runtime (after `install-hooks --apply`) `_lib.sh` is staged
 # alongside this script. From the source tree it lives one dir up.

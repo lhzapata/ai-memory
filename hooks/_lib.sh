@@ -65,20 +65,19 @@ ai_memory_url_encode() {
         | sed 's/%/%25/g; s/+/%2B/g; s/&/%26/g; s/=/%3D/g; s/?/%3F/g; s/#/%23/g; s/ /%20/g'
 }
 
-# Build a query-string suffix from the marker file walked up from "$1".
-# Returns the suffix (with the leading `&`) or nothing. `cwd` is included
-# whenever a marker exists so `GET /handoff` can resolve workspace-only
-# markers by combining `workspace` with basename(cwd), or apply an opt-in
-# project strategy.
+# Build a query-string suffix from "$1" plus any marker file walked up from
+# it. Returns the suffix with the leading `&`, or nothing when cwd is absent.
+# `cwd` is always included so `GET /handoff` resolves the same basename project
+# as the prior hook events even when no marker file exists.
 ai_memory_marker_qs() {
     cwd="$1"
     [ -z "$cwd" ] && return 0
+    qs="&cwd=$(ai_memory_url_encode "$cwd")"
     marker=$(ai_memory_find_marker "$cwd")
-    [ -z "$marker" ] && return 0
+    [ -z "$marker" ] && { printf '%s' "$qs"; return 0; }
     ws=$(ai_memory_parse_toml_key "$marker" workspace)
     pr=$(ai_memory_parse_toml_key "$marker" project)
     st=$(ai_memory_parse_toml_key "$marker" project_strategy)
-    qs="&cwd=$(ai_memory_url_encode "$cwd")"
     [ -n "$ws" ] && qs="${qs}&workspace=$(ai_memory_url_encode "$ws")"
     [ -n "$pr" ] && qs="${qs}&project=$(ai_memory_url_encode "$pr")"
     [ -n "$st" ] && qs="${qs}&project_strategy=$(ai_memory_url_encode "$st")"

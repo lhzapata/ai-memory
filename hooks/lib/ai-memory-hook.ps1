@@ -1,6 +1,18 @@
 function Get-AiMemoryCwd {
     param([string] $Payload)
     if (-not $Payload) { return $null }
+    try {
+        $Parsed = $Payload | ConvertFrom-Json -ErrorAction Stop
+        foreach ($Name in @("cwd", "current_dir", "working_dir", "directory")) {
+            $Value = $Parsed.$Name
+            if ($Value -is [string] -and $Value.Length -gt 0) { return $Value }
+        }
+        $Paths = $Parsed.workspacePaths
+        if ($null -ne $Paths -and $Paths.Count -gt 0 -and $Paths[0] -is [string] -and $Paths[0].Length -gt 0) {
+            return $Paths[0]
+        }
+    } catch {
+    }
     $match = [regex]::Match($Payload, '"cwd"\s*:\s*"([^"]*)"')
     if ($match.Success) { return $match.Groups[1].Value }
     $workspaceMatch = [regex]::Match($Payload, '"workspacePaths"\s*:\s*\[\s*"([^"]*)"')
@@ -36,9 +48,10 @@ function Get-AiMemoryTomlKey {
 
 function Get-AiMemoryMarkerQuery {
     param([string] $Cwd)
-    $marker = Get-AiMemoryMarkerToml -Cwd $Cwd
-    if (-not $marker) { return "" }
+    if (-not $Cwd) { return "" }
     $qs = "&cwd=$([uri]::EscapeDataString($Cwd))"
+    $marker = Get-AiMemoryMarkerToml -Cwd $Cwd
+    if (-not $marker) { return $qs }
     $ws = Get-AiMemoryTomlKey -File $marker -Key "workspace"
     if ($ws) { $qs += "&workspace=$([uri]::EscapeDataString($ws))" }
     $proj = Get-AiMemoryTomlKey -File $marker -Key "project"

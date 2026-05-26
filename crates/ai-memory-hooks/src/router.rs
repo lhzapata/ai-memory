@@ -1281,6 +1281,54 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn handoff_with_no_marker_uses_cwd_basename_project() {
+        let tmp = TempDir::new().unwrap();
+        let state = make_state(&tmp).await;
+        let cwd = "/home/u/plain-repo";
+
+        let (ws, proj) =
+            resolve_project_ids(&state, Some(cwd), None, None, ProjectStrategy::Basename)
+                .await
+                .unwrap();
+        state
+            .writer
+            .insert_handoff(NewHandoff {
+                workspace_id: ws,
+                project_id: proj,
+                from_session_id: None,
+                from_agent: AgentKind::ClaudeCode,
+                to_agent: None,
+                cwd: Some(std::path::PathBuf::from(cwd)),
+                summary: "handoff summary".to_string(),
+                open_questions: Vec::new(),
+                next_steps: vec!["resume plain repo".to_string()],
+                files_touched: Vec::new(),
+            })
+            .await
+            .unwrap();
+
+        let rendered = fetch_and_accept_handoff(
+            &state,
+            HandoffQuery {
+                agent: Some("codex".into()),
+                cwd: Some(cwd.into()),
+                workspace: None,
+                project: None,
+                project_strategy: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            rendered
+                .as_deref()
+                .is_some_and(|s| s.contains("resume plain repo")),
+            "no-marker handoff lookup must still resolve basename(cwd)"
+        );
+    }
+
     /// A marker file with `project = "pe-portais"` replaces the
     /// basename-derived project name for every descendant `cwd`.
     #[tokio::test]

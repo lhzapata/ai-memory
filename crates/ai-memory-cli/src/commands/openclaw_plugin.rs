@@ -198,6 +198,9 @@ fn build_plugin(server_url: &str, auth_token: Option<&str>) -> String {
 // this local OpenClaw plugin package.
 
 import {{ definePluginEntry }} from "openclaw/plugin-sdk/plugin-entry";
+import {{ existsSync, readFileSync }} from "node:fs";
+import {{ dirname, join, resolve }} from "node:path";
+import {{ homedir }} from "node:os";
 
 const SERVER = {server_literal}.replace(/\/+$/, "");
 const AGENT = "openclaw";
@@ -211,6 +214,45 @@ function timeoutSignal(ms: number): AbortSignal | undefined {{
 
 function authHeaders(): Record<string, string> {{
   return TOKEN ? {{ Authorization: `Bearer ${{TOKEN}}` }} : {{}};
+}}
+
+function findMarker(cwd: string | undefined): string | undefined {{
+  if (!cwd) return undefined;
+  let dir = resolve(cwd);
+  const home = homedir();
+  while (dir && dir !== dirname(dir)) {{
+    const marker = join(dir, ".ai-memory.toml");
+    if (existsSync(marker)) return marker;
+    if (home && dir === home) return undefined;
+    dir = dirname(dir);
+  }}
+  return undefined;
+}}
+
+function tomlKey(text: string, key: string): string | undefined {{
+  const re = new RegExp(`^\\s*${{key}}\\s*=\\s*"([^"]*)"`);
+  for (const line of text.split(/\r?\n/)) {{
+    const match = re.exec(line);
+    if (match) return match[1];
+  }}
+  return undefined;
+}}
+
+function applyMarkerParams(url: URL, cwd: string | undefined): void {{
+  if (!cwd) return;
+  url.searchParams.set("cwd", cwd);
+  const marker = findMarker(cwd);
+  if (!marker) return;
+  try {{
+    const body = readFileSync(marker, "utf8");
+    const workspace = tomlKey(body, "workspace");
+    const project = tomlKey(body, "project");
+    const projectStrategy = tomlKey(body, "project_strategy");
+    if (workspace) url.searchParams.set("workspace", workspace);
+    if (project) url.searchParams.set("project", project);
+    if (projectStrategy) url.searchParams.set("project_strategy", projectStrategy);
+  }} catch (_e) {{
+  }}
 }}
 
 function textFrom(value: unknown): string {{
@@ -274,6 +316,7 @@ function postHook(eventName: string, body: Record<string, unknown>): void {{
   const url = new URL(`${{SERVER}}/hook`);
   url.searchParams.set("event", eventName);
   url.searchParams.set("agent", AGENT);
+  applyMarkerParams(url, typeof body.cwd === "string" ? body.cwd : undefined);
   try {{
     void fetch(url, {{
       method: "POST",
@@ -291,7 +334,7 @@ async function fetchHandoff(event: any, ctx: any): Promise<string | undefined> {
   if (!currentCwd) return undefined;
   const url = new URL(`${{SERVER}}/handoff`);
   url.searchParams.set("agent", AGENT);
-  url.searchParams.set("cwd", currentCwd);
+  applyMarkerParams(url, currentCwd);
   try {{
     const response = await fetch(url, {{
       headers: authHeaders(),
@@ -396,6 +439,12 @@ mod tests {
         assert!(plugin.contains("api.on(\"agent_end\""));
         assert!(plugin.contains("postHook(\"session-start\""));
         assert!(plugin.contains("postHook(\"user-prompt\""));
+        assert!(plugin.contains("function applyMarkerParams"));
+        assert!(plugin.contains("tomlKey(body, \"project_strategy\")"));
+        assert!(plugin.contains(
+            "applyMarkerParams(url, typeof body.cwd === \"string\" ? body.cwd : undefined);"
+        ));
+        assert!(plugin.contains("applyMarkerParams(url, currentCwd);"));
         assert!(plugin.contains("fetchHandoff"));
         assert!(plugin.contains("prependContext: handoff"));
         assert!(plugin.contains("Bearer ${TOKEN}"));

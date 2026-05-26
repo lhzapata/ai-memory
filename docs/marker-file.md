@@ -31,10 +31,11 @@ workspace-only markers can still resolve `project = basename(cwd)` for
 handoff lookups.
 
 The marker path is shared by the POSIX/PowerShell hook scripts and the
-generated OpenCode / OMP TypeScript integrations. In all cases, hook
-capture and handoff lookup send the same `cwd`, `workspace`, `project`,
-and `project_strategy` query params to the server when a marker is
-present.
+generated OpenCode / OMP / OpenClaw TypeScript integrations. In all cases,
+hook capture and handoff lookup send the same `cwd`, `workspace`, `project`,
+and `project_strategy` query params to the server when a marker is present;
+handoff lookup also sends `cwd` when no marker exists so the default
+`project = basename(cwd)` route works consistently.
 
 ## Schema
 
