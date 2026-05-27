@@ -50,6 +50,11 @@ fn inode_of(path: &Path) -> std::io::Result<u64> {
     Ok(std::fs::metadata(path)?.ino())
 }
 
+// The NTFS file index is the closest stable analog to a Unix inode and is
+// what the watcher compares to skip its own writes. Unlike Unix, it isn't
+// exposed via `Metadata`; it requires an open handle (`GetFileInformationByHandle`),
+// hence the extra `File::open`. Non-NTFS volumes (FAT) report 0 — harmless:
+// the caller's `.unwrap_or(0)` path already treats 0 as "no stable id".
 #[cfg(windows)]
 fn inode_of(path: &Path) -> std::io::Result<u64> {
     let file = std::fs::File::open(path)?;
