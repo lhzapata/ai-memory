@@ -1,6 +1,6 @@
 name: release
 
-# Triggered when a version tag is pushed, e.g. git push origin v0.3.0.
+# Triggered when a version tag is pushed, e.g. git push origin v0.3.1.
 # Builds the native Linux release tarball, creates the GitHub Release,
 # and pushes the Docker image to Docker Hub with both the version tag
 # and `latest` when Docker Hub credentials are configured.
