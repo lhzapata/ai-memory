@@ -1,5 +1,6 @@
 //! `ai-memory serve` — MCP server with optional filesystem watcher.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use ai_memory_consolidate::{Consolidator, run_lint, run_sweep};
@@ -22,6 +23,7 @@ use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
 };
 use tokio_util::sync::CancellationToken;
+use tower_http::services::{ServeDir, ServeFile};
 use tracing::info;
 
 use crate::auth::{AuthState, require_bearer};
@@ -53,6 +55,8 @@ struct ConsolidatorSetup {
 /// Returns an error if the store cannot be opened, the watcher cannot
 /// install, or the transport setup fails.
 pub async fn run(config: &Config, args: ServeArgs) -> Result<()> {
+    validate_web_ui_args(args.enable_web, args.web_ui_dir.as_deref())?;
+
     let store = Store::open(&config.data_dir)
         .with_context(|| format!("opening store at {}", config.data_dir.display()))?;
 
@@ -199,8 +203,13 @@ pub async fn run(config: &Config, args: ServeArgs) -> Result<()> {
                 .merge(hooks)
                 .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
                 .merge(admin.layer(DefaultBodyLimit::max(BOOTSTRAP_MAX_BODY_BYTES)));
-            let router =
-                mount_web_router(router, args.enable_web, store.reader.clone(), wiki.clone());
+            let router = mount_web_router(
+                router,
+                args.enable_web,
+                store.reader.clone(),
+                wiki.clone(),
+                args.web_ui_dir.as_deref(),
+            );
             let router = apply_http_layers(router, auth_state, config.allowed_hosts.clone());
             let listener = tokio::net::TcpListener::bind(&bind)
                 .await
@@ -540,6 +549,23 @@ fn configure_consolidator(
     })
 }
 
+fn validate_web_ui_args(enable_web: bool, web_ui_dir: Option<&Path>) -> Result<()> {
+    if web_ui_dir.is_some() && !enable_web {
+        anyhow::bail!("--web-ui-dir requires --enable-web");
+    }
+
+    if let Some(dir) = web_ui_dir {
+        if !dir.is_dir() {
+            anyhow::bail!("--web-ui-dir is not a directory: {}", dir.display());
+        }
+        if !dir.join("index.html").is_file() {
+            anyhow::bail!("--web-ui-dir is missing index.html: {}", dir.display());
+        }
+    }
+
+    Ok(())
+}
+
 fn llm_retry_hint(provider: &str, model: &str, base_url: Option<&str>) -> String {
     let mut command = format!("ai-memory llm-test --provider {provider} --model {model}");
     if let Some(base_url) = base_url {
@@ -554,13 +580,32 @@ fn mount_web_router(
     enable_web: bool,
     reader: ReaderPool,
     wiki: Wiki,
+    web_ui_dir: Option<&Path>,
 ) -> axum::Router {
     if !enable_web {
         return router;
     }
-    // Register the web router BEFORE applying the bearer middleware. In
+    // Register the web surfaces BEFORE applying the bearer middleware. In
     // axum 0.8, `.layer()` only attaches to routes registered before the
     // call; nesting after the layer would silently bypass auth for /web/*.
+
+    // Read-only JSON API for third-party frontends (e.g. the custom UI).
+    let router = router.nest(
+        "/api/v1",
+        ai_memory_web::api_router(reader.clone(), wiki.clone()),
+    );
+
+    // Custom SPA via --web-ui-dir (SPA fallback to index.html), otherwise
+    // the built-in server-side wiki browser.
+    if let Some(dir) = web_ui_dir {
+        let dir = dir.to_path_buf();
+        let index = dir.join("index.html");
+        info!(dir = %dir.display(), "custom web UI mounted at /web");
+        // ServeDir already answers /web and /web/ (SPA fallback to index.html);
+        // an explicit /web/ route here would conflict with the nest_service.
+        return router.nest_service("/web", ServeDir::new(dir).fallback(ServeFile::new(index)));
+    }
+
     let web_router = ai_memory_web::router(reader, wiki);
     info!("read-only wiki browser mounted at /web");
     router
@@ -654,12 +699,58 @@ mod tests {
         assert_eq!(host_without_port("[::1]:49374"), "::1");
     }
 
+    #[test]
+    fn web_ui_dir_requires_enable_web() {
+        let ui = TempDir::new().unwrap();
+        std::fs::write(ui.path().join("index.html"), "custom ui").unwrap();
+
+        let err = validate_web_ui_args(false, Some(ui.path())).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("--web-ui-dir requires --enable-web"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn web_ui_dir_must_be_directory() {
+        let tmp = TempDir::new().unwrap();
+        let file = tmp.path().join("index.html");
+        std::fs::write(&file, "custom ui").unwrap();
+
+        let err = validate_web_ui_args(true, Some(&file)).unwrap_err();
+        assert!(
+            err.to_string().contains("--web-ui-dir is not a directory"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn web_ui_dir_must_include_index_html() {
+        let ui = TempDir::new().unwrap();
+
+        let err = validate_web_ui_args(true, Some(ui.path())).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("--web-ui-dir is missing index.html"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn valid_web_ui_dir_passes_validation() {
+        let ui = TempDir::new().unwrap();
+        std::fs::write(ui.path().join("index.html"), "custom ui").unwrap();
+
+        validate_web_ui_args(true, Some(ui.path())).unwrap();
+    }
+
     #[tokio::test]
     async fn web_routes_are_inside_auth_layer() {
         let tmp = TempDir::new().unwrap();
         let store = Store::open(tmp.path()).unwrap();
         let wiki = Wiki::new(tmp.path(), store.writer.clone()).unwrap();
-        let router = mount_web_router(axum::Router::new(), true, store.reader.clone(), wiki);
+        let router = mount_web_router(axum::Router::new(), true, store.reader.clone(), wiki, None);
         let router = apply_http_layers(
             router,
             Arc::new(AuthState::new(Some("secret".to_string()))),
