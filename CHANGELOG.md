@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-05-28
+
 ### Added
 - Read-only **`/api/v1`** JSON surface for third-party frontends: workspaces,
   projects, pages (list + read with frontmatter, body, resolved links, and
@@ -399,7 +401,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Consolidator used server startup default project instead of the
   session's actual project.
 
-[Unreleased]: https://github.com/akitaonrails/ai-memory/compare/v0.5.2...HEAD
+[Unreleased]: https://github.com/akitaonrails/ai-memory/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/akitaonrails/ai-memory/releases/tag/v0.6.0
 [0.5.2]: https://github.com/akitaonrails/ai-memory/releases/tag/v0.5.2
 [0.5.0]: https://github.com/akitaonrails/ai-memory/releases/tag/v0.5.0
 [0.4.0]: https://github.com/akitaonrails/ai-memory/releases/tag/v0.4.0
