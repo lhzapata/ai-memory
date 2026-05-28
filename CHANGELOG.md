@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Read-only **`/api/v1`** JSON surface for third-party frontends: workspaces,
+  projects, pages (list + read with frontmatter, body, resolved links, and
+  back-links), recent, briefing, search (GET single/global + POST multi-scope
+  capped at 25 scopes), and workspace/project `overview` aggregates (handoff +
+  briefing + memory-health drill-down). Mounted before the bearer +
+  host-allowlist middleware so existing auth applies automatically. Read-only
+  by construction — zero writer calls in the handlers ([#7]).
+- **`--web-ui-dir`** flag on `ai-memory serve` to host any static SPA at
+  `/web` (same origin as the API, behind the same auth), with `index.html`
+  SPA fallback via `tower-http::ServeDir`. Validates the directory exists
+  and contains `index.html` before binding. When the flag is absent, the
+  built-in server-side `/web` browser stays the default ([#7]).
+- MCP read tools (`memory_query`, `memory_recent`, `memory_status`,
+  `memory_briefing`, `memory_explore`) accept optional `workspace` +
+  `scopes` args for explicit multi-project queries; existing single-`project`
+  behaviour is unchanged and remains the default ([#7]).
+- New reader queries powering the API: per-page outgoing links + incoming
+  back-links, workspace-aggregated briefing, memory-health (stale /
+  duplicate / orphan) counts and drill-down lists, workspace summaries
+  with last-update timestamps ([#7]).
+
+### Fixed
+- Antigravity `pre-tool-use` hook now emits the documented
+  `{"decision":"allow"}` JSON contract instead of an empty `{}`, while
+  keeping the `ai_memory_post_hook` call fully suppressed
+  (`>/dev/null 2>&1 || true`) so the `queued` body never bleeds into the
+  hook's stdout. Identical logic for `.sh` and `.ps1`; other hook scripts
+  remain silent and unchanged ([#44], thanks @ArtroxGabriel).
+
+### Docs
+- New **[`docs/frontend-api.md`](docs/frontend-api.md)** integration guide
+  for `/api/v1`: auth flow, response schemas (`PageHit`, `BriefingSnapshot`,
+  `HealthDetail`, `PageLinks`, …), error model, limits/pagination,
+  custom-UI hosting, a worked `fetch`/`curl` example, and pointers to the
+  canonical source-of-truth files.
+
 ## [0.5.2] - 2026-05-28
 ### Added
 - `ai-memory status` / `status --json` now includes passive process-scoped LLM
