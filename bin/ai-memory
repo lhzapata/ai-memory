@@ -248,7 +248,10 @@ done
 # 127.0.0.1 would mean "this helper container", so thin-client commands like
 # `status` and `bootstrap` could not reach the default server.
 NETWORK_ARGS=()
-USER_ARGS=()
+# Default: map the container process to the host user so files written
+# through bind mounts (~/.claude/settings.json, $PWD/, …) stay editable
+# by the invoking user. macOS is the one exception (see Darwin arm).
+USER_ARGS=(-u "$(id -u):$(id -g)")
 case "$(uname -s 2>/dev/null || true)" in
   Linux)
     if [ -z "${AI_MEMORY_SERVER_URL:-}" ]; then
@@ -269,9 +272,6 @@ case "$(uname -s 2>/dev/null || true)" in
     # Omitting -u lets the container run as its default (uid 1000)
     # which matches the volume owner.
     USER_ARGS=()
-    ;;
-  *)
-    USER_ARGS=(-u "$(id -u):$(id -g)")
     ;;
 esac
 
@@ -313,7 +313,7 @@ exec "${DOCKER}" run --rm ${TTY_ARGS[@]+"${TTY_ARGS[@]}"} \
   -w /work \
   -e HOME="${HOME}" \
   -e AI_MEMORY_HOST_CWD="${PWD}" \
-  "${USER_ARGS[@]}" \
+  ${USER_ARGS[@]+"${USER_ARGS[@]}"} \
   "${DATA_ARGS[@]}" \
   ${ENV_ARGS[@]+"${ENV_ARGS[@]}"} \
   "${IMAGE}" "$@"

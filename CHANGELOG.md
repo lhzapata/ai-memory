@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **macOS thin-client wrapper no longer crashes with "Permission denied" in
+  the log file appender.** The `bin/ai-memory` wrapper passed
+  `-u $(id -u):$(id -g)` to the one-shot helper container, which on macOS
+  collides with the data volume owner (uid 1000 inside the container vs
+  uid 501/502 on the host). The wrapper now skips `-u` on Darwin so the
+  container runs as its default uid 1000 — Docker Desktop's file-sharing
+  layer handles host ownership transparently — while Linux and other
+  Unix systems continue to receive `-u`. Same change also hardens the
+  `${TTY_ARGS[@]}` / `${NETWORK_ARGS[@]}` / `${ENV_ARGS[@]}` /
+  `${USER_ARGS[@]}` expansions for `set -u` compatibility on macOS's
+  default bash 3.2 ([#51], thanks @abnersajr; supersedes [#50]).
+
 ## [0.7.0] - 2026-05-29
 
 ### Added
