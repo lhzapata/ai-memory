@@ -176,7 +176,14 @@ backpressure, or single-writer SQLite actor.
 
 Pinned pages (`pinned: true` in frontmatter) are exempt from all
 decay paths. Pages under `_slots/` are pinned automatically and surfaced
-in briefing/explore snapshots as tiny editable memory slots.
+in briefing/explore snapshots as tiny editable memory slots. Slot pages
+may declare a write regime with `slot_kind: state` or
+`slot_kind: invariant`; omitted means `state` for backwards
+compatibility. Use `state` for mutable working context such as current
+focus and pending items. Use `invariant` for high-resistance project
+context, identity, rules, or user preferences; consolidation should not
+rewrite an existing invariant slot unless new observations directly
+contradict specific existing content.
 
 ## Crate layout
 

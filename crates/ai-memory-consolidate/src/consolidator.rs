@@ -14,7 +14,7 @@ use ai_memory_wiki::{Wiki, WritePageRequest};
 use thiserror::Error;
 use tracing::{debug, info};
 
-use crate::types::{ConsolidatedBatch, ConsolidatedPage, ConsolidationOutcome};
+use crate::types::{ConsolidatedBatch, ConsolidatedPage, ConsolidationOutcome, SlotKind};
 
 /// Errors raised by the consolidator.
 #[derive(Debug, Error)]
@@ -202,6 +202,54 @@ impl Consolidator {
         self.llm.clone()
     }
 
+    fn should_skip_high_resistance_slot_update(
+        &self,
+        workspace_id: WorkspaceId,
+        project_id: ProjectId,
+        req: &WritePageRequest,
+    ) -> ConsolidatorResult<bool> {
+        if !is_slot_path(&req.path) {
+            return Ok(false);
+        }
+        let existing = match self.wiki.read_page(workspace_id, project_id, &req.path) {
+            Ok(md) => Some(md.frontmatter),
+            Err(ai_memory_wiki::WikiError::Io(err))
+                if err.kind() == std::io::ErrorKind::NotFound =>
+            {
+                None
+            }
+            Err(err) => return Err(err.into()),
+        };
+        Ok(should_skip_high_resistance_slot_update_from_frontmatter(
+            &req.path,
+            existing.as_ref(),
+            &req.frontmatter,
+        ))
+    }
+
+    async fn slot_snapshots(
+        &self,
+        workspace_id: WorkspaceId,
+        project_id: ProjectId,
+    ) -> ConsolidatorResult<Vec<SlotSnapshot>> {
+        let briefing = self
+            .reader
+            .briefing_for_project(workspace_id, project_id, 100)
+            .await?;
+        let mut slots = Vec::with_capacity(briefing.slots.len());
+        for slot in briefing.slots {
+            let path = PagePath::new(slot.path)?;
+            let md = self.wiki.read_page(workspace_id, project_id, &path)?;
+            slots.push(SlotSnapshot {
+                path: path.as_str().to_string(),
+                title: slot.title,
+                slot_kind: slot_kind_from_frontmatter(&md.frontmatter),
+                body: md.body,
+            });
+        }
+        Ok(slots)
+    }
+
     /// M7b multi-page consolidation: ask the LLM for a batch of page
     /// updates spanning sessions/, concepts/, decisions/, then write
     /// them all atomically (one SQL transaction).
@@ -225,7 +273,8 @@ impl Consolidator {
             .session_project_ids(session_id)
             .await?
             .unwrap_or((self.workspace_id, self.project_id));
-        let request = build_batch_request(session_id, &observations);
+        let slots = self.slot_snapshots(ws, proj).await?;
+        let request = build_batch_request_with_slots(session_id, &observations, &slots);
         debug!(
             session = %session_id,
             provider = self.llm.name(),
@@ -238,6 +287,13 @@ impl Consolidator {
         let mut outcomes_preview = Vec::with_capacity(batch.updates.len());
         for upd in &batch.updates {
             let (req, outcome) = build_update(ws, proj, upd, dry_run)?;
+            if self.should_skip_high_resistance_slot_update(ws, proj, &req)? {
+                debug!(
+                    path = %req.path.as_str(),
+                    "skipping invariant slot update without explicit invariant contradiction signal",
+                );
+                continue;
+            }
             requests.push(req);
             outcomes_preview.push(outcome);
         }
@@ -317,6 +373,12 @@ fn build_update(
             ),
         );
     }
+    if is_slot_path(&path) {
+        fm.insert(
+            "slot_kind".into(),
+            serde_json::Value::String(upd.slot_kind.as_str().into()),
+        );
+    }
     fm.insert("consolidated".into(), serde_json::Value::Bool(true));
 
     let req = WritePageRequest {
@@ -349,11 +411,53 @@ const fn tier_as_str(t: Tier) -> &'static str {
     }
 }
 
+fn is_slot_path(path: &PagePath) -> bool {
+    path.as_str().starts_with("_slots/")
+}
+
+fn slot_kind_from_frontmatter(frontmatter: &serde_json::Value) -> SlotKind {
+    match frontmatter
+        .get("slot_kind")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("invariant") => SlotKind::Invariant,
+        _ => SlotKind::State,
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SlotSnapshot {
+    path: String,
+    title: String,
+    slot_kind: SlotKind,
+    body: String,
+}
+
+fn should_skip_high_resistance_slot_update_from_frontmatter(
+    path: &PagePath,
+    existing_frontmatter: Option<&serde_json::Value>,
+    incoming_frontmatter: &serde_json::Value,
+) -> bool {
+    is_slot_path(path)
+        && existing_frontmatter
+            .map(|fm| slot_kind_from_frontmatter(fm) == SlotKind::Invariant)
+            .unwrap_or(false)
+        && slot_kind_from_frontmatter(incoming_frontmatter) != SlotKind::Invariant
+}
+
 /// Build the exact ChatRequest the consolidator sends for batch
 /// multi-page consolidation. Exposed so off-tree A/B harnesses
 /// (e.g. `evals/`) can exercise the same workload against
 /// alternative providers without duplicating the prompt.
 pub fn build_batch_request(session_id: SessionId, observations: &[Observation]) -> ChatRequest {
+    build_batch_request_with_slots(session_id, observations, &[])
+}
+
+fn build_batch_request_with_slots(
+    session_id: SessionId,
+    observations: &[Observation],
+    slots: &[SlotSnapshot],
+) -> ChatRequest {
     let mut buf = String::new();
     buf.push_str(
         "You are compiling a Karpathy-style multi-page wiki update. Given the \
@@ -372,12 +476,33 @@ pub fn build_batch_request(session_id: SessionId, observations: &[Observation]) 
             buf.push_str(&format!("    body: {}\n", one_line(&o.body)));
         }
     }
+    if !slots.is_empty() {
+        buf.push_str("\nCurrent `_slots/` pages (for write-regime decisions):\n");
+        for slot in slots {
+            buf.push_str(&format!(
+                "- {} | slot_kind={} | title={}\n",
+                slot.path,
+                slot.slot_kind.as_str(),
+                one_line(&slot.title),
+            ));
+            if !slot.body.trim().is_empty() {
+                buf.push_str("    body:\n");
+                buf.push_str(&indent_for_prompt(&clip_for_prompt(&slot.body, 1_200)));
+                buf.push('\n');
+            }
+        }
+    }
     buf.push_str(
         "\nProduce up to 5 page updates. Use these path conventions:\n\
          - sessions/<session_id>.md  (episodic, this run's narrative)\n\
          - concepts/<slug>.md         (semantic, evergreen concept pages)\n\
          - decisions/<short>.md       (semantic, ADR-style records)\n\
          - gotchas/<slug>.md          (semantic, failure modes / surprises)\n\
+         - _slots/<name>.md           (pinned memory slot; use sparingly)\n\
+         \nSlot pages have two write regimes. For `_slots/*` updates you may include `slot_kind`:\n\
+         - \"state\"      (default; mutable current focus, pending items, working context)\n\
+         - \"invariant\"  (high-resistance project rules, identity, or user preferences)\n\
+         Do not emit an update for an existing invariant slot unless the observations directly contradict specific existing content. State slots may be refreshed normally.\n\
          \nSet `tier` to EXACTLY ONE of these four strings — never an integer, never a synonym:\n\
          - \"working\"      (the live in-progress slice of the session — rarely used here)\n\
          - \"episodic\"     (per-session narrative; the sessions/<id>.md page)\n\
@@ -400,7 +525,8 @@ pub fn build_batch_request(session_id: SessionId, observations: &[Observation]) 
          - \"tier\"            (string)  required — one of the four tier strings above\n\
          - \"kind\"            (string)  required — one of the four kind strings above\n\
          - \"tags\"            (array of string)  required — may be empty `[]`, but the key must be present\n\
-         No other keys. No `body`, no `content`, no `summary`. Field names \
+         - \"slot_kind\"       (string) optional — only for `_slots/*`; one of \"state\" or \"invariant\"; omitted means \"state\"\n\
+         No other keys except optional `slot_kind` on `_slots/*`. No `body`, no `content`, no `summary`. Field names \
          are case-sensitive and the `_markdown` suffix matters.\n\
          \n## Output format (read this carefully)\n\
          Reply with ONE JSON object matching the ConsolidatedBatch schema, \
@@ -519,6 +645,22 @@ fn one_line(s: &str) -> String {
         .collect()
 }
 
+fn clip_for_prompt(s: &str, max_chars: usize) -> String {
+    let mut chars = s.chars();
+    let mut out: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        out.push_str("\n[truncated]");
+    }
+    out
+}
+
+fn indent_for_prompt(s: &str) -> String {
+    s.lines()
+        .map(|line| format!("    {line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// ASCII-slug a rule title for the `_rules/<slug>.md` path.
 ///
 /// Lower-cases, replaces runs of non-`[a-z0-9]` with `-`, trims
@@ -601,5 +743,110 @@ mod tests {
         let slug = slugify_for_rule(&long);
         assert!(slug.len() <= 60);
         assert!(!slug.ends_with('-'));
+    }
+
+    #[test]
+    fn slot_update_defaults_to_state_frontmatter() {
+        let update = crate::types::ConsolidatedPageUpdate {
+            path: "_slots/current_focus.md".into(),
+            tier: Tier::Semantic,
+            kind: crate::types::PageKind::Fact,
+            title: "Current focus".into(),
+            body_markdown: "Ship the slot-kind PR.".into(),
+            tags: Vec::new(),
+            slot_kind: SlotKind::State,
+        };
+        let (req, _) = build_update(WorkspaceId::new(), ProjectId::new(), &update, true).unwrap();
+        assert_eq!(req.frontmatter["slot_kind"], "state");
+    }
+
+    #[test]
+    fn slot_update_preserves_explicit_invariant_frontmatter() {
+        let update = crate::types::ConsolidatedPageUpdate {
+            path: "_slots/project_context.md".into(),
+            tier: Tier::Semantic,
+            kind: crate::types::PageKind::Fact,
+            title: "Project context".into(),
+            body_markdown: "This repo uses a markdown wiki as source of truth.".into(),
+            tags: Vec::new(),
+            slot_kind: SlotKind::Invariant,
+        };
+        let (req, _) = build_update(WorkspaceId::new(), ProjectId::new(), &update, true).unwrap();
+        assert_eq!(req.frontmatter["slot_kind"], "invariant");
+    }
+
+    #[test]
+    fn invariant_slot_skips_state_rewrite_candidate() {
+        let path = PagePath::new("_slots/project_context.md").unwrap();
+        let existing = serde_json::json!({"title": "Project context", "slot_kind": "invariant"});
+        let incoming = serde_json::json!({"title": "Project context", "slot_kind": "state"});
+        assert!(should_skip_high_resistance_slot_update_from_frontmatter(
+            &path,
+            Some(&existing),
+            &incoming,
+        ));
+    }
+
+    #[test]
+    fn invariant_slot_allows_explicit_invariant_rewrite_candidate() {
+        let path = PagePath::new("_slots/project_context.md").unwrap();
+        let existing = serde_json::json!({"title": "Project context", "slot_kind": "invariant"});
+        let incoming = serde_json::json!({"title": "Project context", "slot_kind": "invariant"});
+        assert!(!should_skip_high_resistance_slot_update_from_frontmatter(
+            &path,
+            Some(&existing),
+            &incoming,
+        ));
+    }
+
+    #[test]
+    fn non_slot_paths_ignore_slot_kind_guard() {
+        let path = PagePath::new("concepts/project-context.md").unwrap();
+        let existing = serde_json::json!({"slot_kind": "invariant"});
+        let incoming = serde_json::json!({"slot_kind": "state"});
+        assert!(!should_skip_high_resistance_slot_update_from_frontmatter(
+            &path,
+            Some(&existing),
+            &incoming,
+        ));
+    }
+
+    #[test]
+    fn missing_slot_kind_defaults_to_state() {
+        assert_eq!(
+            slot_kind_from_frontmatter(&serde_json::json!({"title": "Pending items"})),
+            SlotKind::State,
+        );
+    }
+
+    #[test]
+    fn batch_request_includes_existing_slot_regimes() {
+        let session_id = SessionId::new();
+        let slots = vec![SlotSnapshot {
+            path: "_slots/project_context.md".into(),
+            title: "Project context".into(),
+            slot_kind: SlotKind::Invariant,
+            body: "This is stable unless a later observation contradicts it.".into(),
+        }];
+        let request = build_batch_request_with_slots(session_id, &[], &slots);
+        let prompt = &request.messages[0].content;
+        assert!(prompt.contains("Current `_slots/` pages"));
+        assert!(prompt.contains("_slots/project_context.md | slot_kind=invariant"));
+        assert!(prompt.contains("This is stable unless"));
+    }
+
+    #[test]
+    fn page_update_deserialisation_defaults_slot_kind_to_state() {
+        let update: crate::types::ConsolidatedPageUpdate =
+            serde_json::from_value(serde_json::json!({
+                "path": "_slots/current_focus.md",
+                "tier": "semantic",
+                "kind": "fact",
+                "title": "Current focus",
+                "body_markdown": "Keep the PR narrow.",
+                "tags": []
+            }))
+            .unwrap();
+        assert_eq!(update.slot_kind, SlotKind::State);
     }
 }

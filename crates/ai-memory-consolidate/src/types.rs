@@ -63,6 +63,34 @@ impl PageKind {
     }
 }
 
+/// Write-regime hint for `_slots/*.md` pages.
+///
+/// Slot pages are always pinned, but they do not all want the same
+/// consolidation gradient. `State` slots are the mutable working set
+/// (current focus, pending items); `Invariant` slots are high-resistance
+/// project context or user preferences and should only be rewritten when
+/// observations explicitly contradict existing content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SlotKind {
+    /// Stable context or preference. High write resistance.
+    Invariant,
+    /// Mutable current-state slot. Default for backwards compatibility.
+    #[default]
+    State,
+}
+
+impl SlotKind {
+    /// Wire string for serialisation + frontmatter.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Invariant => "invariant",
+            Self::State => "state",
+        }
+    }
+}
+
 /// One update inside a multi-page consolidation batch (M7b).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ConsolidatedPageUpdate {
@@ -89,6 +117,11 @@ pub struct ConsolidatedPageUpdate {
     /// Optional tags surfaced into frontmatter.
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Write-regime hint for `_slots/*.md` updates. Ignored for non-slot
+    /// paths. Defaults to `state` so existing structured outputs keep their
+    /// current behaviour.
+    #[serde(default)]
+    pub slot_kind: SlotKind,
 }
 
 /// Batch produced by [`ConsolidatorMulti`].

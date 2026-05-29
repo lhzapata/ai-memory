@@ -160,6 +160,15 @@ pub fn upsert_pages_batch(conn: &mut Connection, pages: &[NewPage]) -> StoreResu
     Ok(out)
 }
 
+struct ExistingPageVersion {
+    id: Vec<u8>,
+    body_sha256: Vec<u8>,
+    frontmatter_json: String,
+    title: String,
+    tier: String,
+    pinned: i64,
+}
+
 fn upsert_page_in_tx(
     tx: &rusqlite::Transaction<'_>,
     page: &NewPage,
@@ -173,27 +182,41 @@ fn upsert_page_in_tx(
     let frontmatter_str = serde_json::to_string(&page.frontmatter_json)?;
     let tier_str = page.tier.as_str();
 
-    let existing: Option<(Vec<u8>, Vec<u8>)> = tx
+    let existing: Option<ExistingPageVersion> = tx
         .query_row(
-            "SELECT id, body_sha256 FROM pages \
+            "SELECT id, body_sha256, frontmatter_json, title, tier, pinned FROM pages \
              WHERE workspace_id = ?1 AND project_id = ?2 AND path = ?3 AND is_latest = 1",
             params![
                 page.workspace_id.as_bytes(),
                 page.project_id.as_bytes(),
                 page.path.as_str(),
             ],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| {
+                Ok(ExistingPageVersion {
+                    id: row.get(0)?,
+                    body_sha256: row.get(1)?,
+                    frontmatter_json: row.get(2)?,
+                    title: row.get(3)?,
+                    tier: row.get(4)?,
+                    pinned: row.get(5)?,
+                })
+            },
         )
         .optional()?;
 
-    if let Some((existing_id, existing_sha)) = existing {
-        if existing_sha == body_sha256 {
-            return PageId::from_slice(&existing_id).map_err(StoreError::from);
+    if let Some(existing) = existing {
+        if existing.body_sha256 == body_sha256
+            && existing.frontmatter_json == frontmatter_str
+            && existing.title == page.title
+            && existing.tier == tier_str
+            && existing.pinned == i64::from(page.pinned)
+        {
+            return PageId::from_slice(&existing.id).map_err(StoreError::from);
         }
         let new_id = PageId::new();
         tx.execute(
             "UPDATE pages SET is_latest = 0 WHERE id = ?1",
-            params![existing_id],
+            params![&existing.id],
         )?;
         tx.execute(
             "INSERT INTO pages \
@@ -210,7 +233,7 @@ fn upsert_page_in_tx(
                 page.body,
                 body_sha256.as_slice(),
                 frontmatter_str,
-                existing_id,
+                &existing.id,
                 i64::from(page.pinned),
                 now,
             ],
@@ -1015,6 +1038,37 @@ mod tests {
             )
             .unwrap();
         assert_eq!(total, 1, "no duplicate row for unchanged content");
+    }
+
+    #[test]
+    fn upsert_page_supersedes_on_frontmatter_change() {
+        let (_tmp, mut conn, ws, proj) = fresh_db();
+        let mut p1 = page(ws, proj, "_slots/project_context.md", "same body");
+        p1.frontmatter_json = serde_json::json!({
+            "title": "Project context",
+            "slot_kind": "state",
+        });
+        let id1 = upsert_page(&mut conn, &p1).unwrap();
+
+        let mut p2 = p1.clone();
+        p2.frontmatter_json = serde_json::json!({
+            "title": "Project context",
+            "slot_kind": "invariant",
+        });
+        let id2 = upsert_page(&mut conn, &p2).unwrap();
+
+        assert_ne!(id1, id2, "frontmatter-only changes must supersede");
+        let latest_frontmatter: String = conn
+            .query_row(
+                "SELECT frontmatter_json FROM pages WHERE id = ?1 AND is_latest = 1",
+                params![id2.as_bytes()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            latest_frontmatter.contains("invariant"),
+            "latest row should store the updated slot_kind"
+        );
     }
 
     #[test]

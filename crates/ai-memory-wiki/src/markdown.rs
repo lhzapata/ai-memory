@@ -302,6 +302,21 @@ mod tests {
     }
 
     #[test]
+    fn round_trip_preserves_slot_kind_frontmatter() {
+        let original = Markdown {
+            frontmatter: serde_json::json!({
+                "title": "Project context",
+                "slot_kind": "invariant",
+            }),
+            body: "Stable project context.\n".into(),
+        };
+        let emitted = emit(&original).unwrap();
+        let parsed = parse(&emitted).unwrap();
+        assert_eq!(parsed.frontmatter["slot_kind"], "invariant");
+        assert_eq!(parsed.body, original.body);
+    }
+
+    #[test]
     fn emit_omits_empty_frontmatter() {
         let md = Markdown {
             frontmatter: serde_json::Value::Object(serde_json::Map::new()),

@@ -129,7 +129,10 @@ Recommended shape:
 
 The important constraint is budget. Do not copy agentmemory's broad
 always-injected context problem. Slots should be tiny, explicit, and
-auditable.
+auditable. When a slot's write regime matters, use frontmatter:
+`slot_kind: invariant` for stable context/preferences and
+`slot_kind: state` for mutable current focus or pending items. Missing
+`slot_kind` defaults to `state`.
 
 ### P0: Make Maintenance Scheduled, Not Only Manual
 

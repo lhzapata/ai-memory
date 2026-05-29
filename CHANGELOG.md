@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `_slots/*.md` pages can now declare `slot_kind: state` or
+  `slot_kind: invariant` frontmatter. `state` remains the default for existing
+  slots; `invariant` marks high-resistance project context or preferences that
+  consolidation should not rewrite unless observations directly contradict the
+  existing slot content ([#47], closes [#14]).
+
 ### Fixed
 - **Windows PowerShell hooks no longer hang or stall the agent.** The shared
   `hooks/lib/ai-memory-hook.ps1` read stdin via `[Console]::In.ReadToEnd()`,
@@ -19,7 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tolerate remote servers over higher-latency links. The full raw payload is
   still forwarded (parity with `_lib.sh`), so observation title/body stay
   intact. Affects every agent still on the PowerShell hook runner
-  (Codex, Cursor, Gemini CLI, Antigravity, OpenCode on Windows).
+  (Codex, Cursor, Gemini CLI, Antigravity, OpenCode on Windows) ([#48]).
+- Page upserts now treat frontmatter/title/tier/pinned changes as real page
+  updates instead of short-circuiting solely on unchanged body text, keeping
+  the SQLite index consistent with markdown frontmatter-only edits ([#47]).
 
 ## [0.6.1] - 2026-05-28
 
