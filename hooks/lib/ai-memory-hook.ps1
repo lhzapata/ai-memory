@@ -61,6 +61,25 @@ function Get-AiMemoryMarkerQuery {
     return $qs
 }
 
+function Read-AiMemoryStdin {
+    try {
+        if (-not [Console]::IsInputRedirected) { return "" }
+        $StdinStream = [Console]::OpenStandardInput()
+        $StdinReader = [System.IO.StreamReader]::new($StdinStream, [System.Text.Encoding]::UTF8, $false, 4096)
+        $ReadTask = $StdinReader.ReadToEndAsync()
+        if ($ReadTask.Wait(2000)) {
+            $result = $ReadTask.Result
+            $StdinReader.Dispose()
+            $StdinStream.Dispose()
+            return $result
+        }
+        $StdinReader.Dispose()
+        $StdinStream.Dispose()
+    } catch {
+    }
+    return ""
+}
+
 function Invoke-AiMemoryHook {
     param(
         [Parameter(Mandatory = $true)] [string] $Event,
@@ -70,7 +89,7 @@ function Invoke-AiMemoryHook {
     )
 
     $Server = if ($env:AI_MEMORY_HOOK_URL) { $env:AI_MEMORY_HOOK_URL } else { "http://127.0.0.1:49374" }
-    $Payload = [Console]::In.ReadToEnd()
+    $Payload = Read-AiMemoryStdin
     $Cwd = Get-AiMemoryCwd -Payload $Payload
     $QS = Get-AiMemoryMarkerQuery -Cwd $Cwd
     $Headers = @{}
@@ -82,7 +101,7 @@ function Invoke-AiMemoryHook {
     try {
         Invoke-WebRequest `
             -UseBasicParsing `
-            -TimeoutSec 1 `
+            -TimeoutSec 3 `
             -Method Post `
             -Uri "$Server/hook?event=$Event&agent=$Agent$QS" `
             -Headers $Headers `
@@ -95,7 +114,7 @@ function Invoke-AiMemoryHook {
         try {
             $Response = Invoke-WebRequest `
                 -UseBasicParsing `
-                -TimeoutSec 1 `
+                -TimeoutSec 2 `
                 -Uri "$Server/handoff?agent=$Agent$QS" `
                 -Headers $Headers
             if ($null -ne $Response -and $Response.Content) {

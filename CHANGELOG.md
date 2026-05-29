@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Windows PowerShell hooks no longer hang or stall the agent.** The shared
+  `hooks/lib/ai-memory-hook.ps1` read stdin via `[Console]::In.ReadToEnd()`,
+  which blocks indefinitely when the agent does not close the stdin pipe
+  (observed on Claude Code `PreCompact`); because the `Invoke-WebRequest`
+  timeout only starts after the read returns, a stuck read meant the hook
+  never POSTed anything. Stdin is now read asynchronously, guarded by
+  `[Console]::IsInputRedirected` with a 2s cap, so the hook can never freeze.
+  HTTP timeouts were also raised from 1s to 3s (POST) / 2s (handoff GET) to
+  tolerate remote servers over higher-latency links. The full raw payload is
+  still forwarded (parity with `_lib.sh`), so observation title/body stay
+  intact. Affects every agent still on the PowerShell hook runner
+  (Codex, Cursor, Gemini CLI, Antigravity, OpenCode on Windows).
+
 ## [0.6.1] - 2026-05-28
 
 ### Added
