@@ -13,6 +13,8 @@
 //! - `POST /admin/commit`         — stage + commit the wiki tree via git.
 //! - `POST /admin/purge-project`  — delete a project and all its data.
 //! - `POST /admin/rename-project` — rename a project (column-only; no files move).
+//! - `POST /admin/move-project`   — move a project into another workspace
+//!   (copy latest pages via the write path, then purge the source).
 //! - `POST /admin/write-page`     — write or update a wiki page atomically.
 //! - `GET  /admin/read-page`      — fetch the full body of a single wiki page by path.
 //!
@@ -140,6 +142,7 @@ fn default_chunk_input_tokens() -> usize {
 /// - `POST /admin/commit`
 /// - `POST /admin/purge-project`
 /// - `POST /admin/rename-project`
+/// - `POST /admin/move-project`
 /// - `POST /admin/write-page`
 pub fn admin_router(state: AdminState) -> Router {
     Router::new()
@@ -155,6 +158,7 @@ pub fn admin_router(state: AdminState) -> Router {
         .route("/admin/commit", post(handle_commit))
         .route("/admin/purge-project", post(handle_purge_project))
         .route("/admin/rename-project", post(handle_rename_project))
+        .route("/admin/move-project", post(handle_move_project))
         .route("/admin/write-page", post(handle_write_page))
         .route(
             "/admin/users",
@@ -1575,6 +1579,235 @@ async fn handle_rename_project(
     (
         StatusCode::OK,
         Json(serde_json::to_value(&summary).unwrap_or_else(|_| serde_json::json!({}))),
+    )
+}
+
+// ---------------------------------------------------------------------
+// move-project
+// ---------------------------------------------------------------------
+
+/// JSON request body for `POST /admin/move-project`.
+#[derive(Deserialize)]
+struct MoveProjectRequest {
+    /// Source workspace. Must already exist; we 404 if absent.
+    from_workspace: String,
+    /// Project name to move. Must already exist in `from_workspace`; 404 if absent.
+    project: String,
+    /// Destination workspace. Auto-created if absent.
+    to_workspace: String,
+    /// Mandatory confirmation flag. The move PURGES the source after
+    /// copying, so without `confirm: true` the server returns 400.
+    confirm: bool,
+}
+
+/// Wire-format report returned by `POST /admin/move-project`.
+#[derive(Debug, Serialize)]
+pub struct MoveProjectReport {
+    /// `from_workspace/project` label.
+    pub from: String,
+    /// `to_workspace/project` label.
+    pub to: String,
+    /// `true` when the destination workspace already held a same-named
+    /// project — the copy MERGED into it rather than creating a fresh one.
+    pub merged_into_existing: bool,
+    /// Number of latest pages copied into the destination.
+    pub pages_copied: u64,
+    /// Source paths whose on-disk file could not be read (copy skipped).
+    /// When non-empty the source is NOT purged so a fixed re-run is safe.
+    pub pages_skipped: Vec<String>,
+    /// Whether the source project was purged (only when every page copied).
+    pub source_purged: bool,
+    /// Source `pages` rows deleted by the purge (all versions).
+    pub source_pages_deleted: u64,
+    /// Source `sessions` rows deleted by the purge.
+    pub source_sessions_deleted: u64,
+    /// Source `observations` rows deleted by the purge.
+    pub source_observations_deleted: u64,
+    /// Source `handoffs` rows deleted by the purge.
+    pub source_handoffs_deleted: u64,
+    /// Source `page_embeddings` rows deleted by the purge.
+    pub source_embeddings_deleted: u64,
+    /// Source on-disk dirs removed.
+    pub files_deleted: Vec<String>,
+    /// Source on-disk dirs that could not be removed (non-fatal).
+    pub files_failed: Vec<String>,
+}
+
+async fn handle_move_project(
+    State(state): State<Arc<AdminState>>,
+    Json(req): Json<MoveProjectRequest>,
+) -> impl IntoResponse {
+    // Destructive: it purges the source after copying. Require confirm.
+    if !req.confirm {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "destructive operation requires confirm=true"
+            })),
+        );
+    }
+
+    // A same-workspace "move" would get-or-create the SAME project as both
+    // source and destination, copy it onto itself, then purge it — data
+    // loss. Reject; in-workspace renames go through rename-project.
+    if req.from_workspace == req.to_workspace {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({
+                "error": "from_workspace and to_workspace are identical; use rename-project instead"
+            })),
+        );
+    }
+
+    // Resolve the SOURCE without auto-creating — 404 on a typo.
+    let (src_ws, src_proj) =
+        match lookup_ws_proj_no_create(&state, &req.from_workspace, &req.project).await {
+            Ok(ids) => ids,
+            Err(e) => return e,
+        };
+
+    // Detect MERGE: does the destination workspace already hold a same-named
+    // project? (find_workspace may be None when the dest ws doesn't exist yet.)
+    let merged_into_existing = match state.reader.find_workspace(req.to_workspace.clone()).await {
+        Ok(Some(dst_ws)) => matches!(
+            state.reader.find_project(dst_ws, req.project.clone()).await,
+            Ok(Some(_))
+        ),
+        Ok(None) => false,
+        Err(e) => return internal_err(e.to_string()),
+    };
+
+    // Get-or-create the DESTINATION (new ProjectId unless merging). Also
+    // auto-creates the destination workspace.
+    let (dst_ws, dst_proj) = match resolve_ws_proj(&state, &req.to_workspace, &req.project).await {
+        Ok(ids) => ids,
+        Err(e) => return e,
+    };
+
+    // Enumerate the source's latest pages (authoritative on is_latest).
+    let summaries = match state
+        .reader
+        .list_pages(&req.from_workspace, &req.project)
+        .await
+    {
+        Ok(s) => s,
+        Err(e) => return internal_err(e.to_string()),
+    };
+
+    // COPY each page through the canonical write path so sanitization, link
+    // re-resolution, FTS upsert (and admission/git-mirror on deploy) all fire.
+    let mut pages_copied = 0u64;
+    let mut pages_skipped: Vec<String> = Vec::new();
+    for s in &summaries {
+        let path = match PagePath::new(s.path.clone()) {
+            Ok(p) => p,
+            Err(_) => {
+                pages_skipped.push(s.path.clone());
+                continue;
+            }
+        };
+        let tier: Tier = s.tier.parse().unwrap_or(Tier::Semantic);
+        let pinned = matches!(
+            state.reader.page_meta(&req.from_workspace, &req.project, &s.path).await,
+            Ok(Some(ref m)) if m.pinned
+        );
+        let md = match state.wiki.read_page(src_ws, src_proj, &path) {
+            Ok(md) => md,
+            Err(e) => {
+                warn!(path = %s.path, error = %e, "move-project: source read failed; skipping");
+                pages_skipped.push(s.path.clone());
+                continue;
+            }
+        };
+        if let Err(e) = state
+            .wiki
+            .write_page(WritePageRequest {
+                workspace_id: dst_ws,
+                project_id: dst_proj,
+                path: path.clone(),
+                frontmatter: md.frontmatter,
+                body: md.body,
+                tier,
+                pinned,
+                // Preserve the stored title verbatim (PageSummary.title is
+                // the DB-derived title), rather than re-deriving it.
+                title: Some(s.title.clone()),
+                author_id: None,
+                actor: ai_memory_core::ActorContext::anonymous(),
+            })
+            .await
+        {
+            // ANY copy failure aborts BEFORE the purge — the source survives.
+            return internal_err(format!("copy of {} failed: {e}", s.path));
+        }
+        pages_copied += 1;
+    }
+
+    // Safety: a skipped (unreadable) source page blocks the purge — purging
+    // now would destroy data we failed to copy. Report and let the operator
+    // fix + re-run (re-running is idempotent: copied pages just supersede).
+    if !pages_skipped.is_empty() {
+        let report = MoveProjectReport {
+            from: format!("{}/{}", req.from_workspace, req.project),
+            to: format!("{}/{}", req.to_workspace, req.project),
+            merged_into_existing,
+            pages_copied,
+            pages_skipped,
+            source_purged: false,
+            source_pages_deleted: 0,
+            source_sessions_deleted: 0,
+            source_observations_deleted: 0,
+            source_handoffs_deleted: 0,
+            source_embeddings_deleted: 0,
+            files_deleted: Vec::new(),
+            files_failed: Vec::new(),
+        };
+        return (
+            StatusCode::OK,
+            Json(serde_json::to_value(&report).unwrap_or_else(|_| serde_json::json!({}))),
+        );
+    }
+
+    // PURGE the source — only reached when every page copied successfully.
+    let label = format!("{}/{}", req.from_workspace, req.project);
+    let summary = match state.writer.purge_project(src_ws, src_proj, &label).await {
+        Ok(s) => s,
+        Err(e) => return internal_err(e.to_string()),
+    };
+
+    // Remove the source's on-disk dir (mirrors handle_purge_project). DB
+    // cascade already deleted the rows; dir removal is best-effort.
+    let proj_root = state.wiki.project_root(src_ws, src_proj);
+    let proj_root_str = proj_root.display().to_string();
+    let mut files_deleted: Vec<String> = Vec::new();
+    let mut files_failed: Vec<String> = Vec::new();
+    match std::fs::remove_dir_all(&proj_root) {
+        Ok(()) => files_deleted.push(proj_root_str),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            warn!(path = %proj_root_str, error = %e, "move-project: failed to remove source dir");
+            files_failed.push(proj_root_str);
+        }
+    }
+
+    let report = MoveProjectReport {
+        from: label,
+        to: format!("{}/{}", req.to_workspace, req.project),
+        merged_into_existing,
+        pages_copied,
+        pages_skipped: Vec::new(),
+        source_purged: true,
+        source_pages_deleted: summary.pages_deleted,
+        source_sessions_deleted: summary.sessions_deleted,
+        source_observations_deleted: summary.observations_deleted,
+        source_handoffs_deleted: summary.handoffs_deleted,
+        source_embeddings_deleted: summary.embeddings_deleted,
+        files_deleted,
+        files_failed,
+    };
+    (
+        StatusCode::OK,
+        Json(serde_json::to_value(&report).unwrap_or_else(|_| serde_json::json!({}))),
     )
 }
 

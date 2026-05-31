@@ -96,6 +96,12 @@ pub enum Command {
     /// Useful after renaming the project's directory on disk so the hook
     /// router keeps writing into the same logical project.
     RenameProject(RenameProjectArgs),
+    /// Move a project into another workspace. Copies every latest page into
+    /// the destination (a NEW project, or MERGES into an existing same-named
+    /// one) through the normal write path, then PURGES the source. The
+    /// source-side purge is irreversible — requires `--confirm`. Note:
+    /// sessions/observations/handoffs do NOT migrate (only durable pages).
+    MoveProject(MoveProjectArgs),
     /// Remove ai-memory's wiring (hooks, MCP, instructions) from all
     /// detected agents. Dry-run unless `--apply`.
     Uninstall(UninstallArgs),
@@ -339,6 +345,25 @@ pub struct RenameProjectArgs {
     /// New project name. Must be non-empty and contain no slashes.
     #[arg(long)]
     pub to: String,
+}
+
+/// Arguments for `move-project`.
+#[derive(Debug, Args)]
+pub struct MoveProjectArgs {
+    /// Source workspace. Defaults to `default`.
+    #[arg(long, default_value_t = crate::config::DEFAULT_WORKSPACE.to_string())]
+    pub from_workspace: String,
+    /// Project name to move. When omitted, auto-derived from the basename
+    /// of the current git repo root (or CWD if no git repo).
+    #[arg(long)]
+    pub project: Option<String>,
+    /// Destination workspace. Auto-created if it doesn't exist.
+    #[arg(long)]
+    pub to_workspace: String,
+    /// REQUIRED — the move PURGES the source project after copying.
+    /// Without this flag the CLI errors out.
+    #[arg(long)]
+    pub confirm: bool,
 }
 
 /// Arguments for `install-instructions`.
