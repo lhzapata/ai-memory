@@ -997,6 +997,94 @@ pub fn purge_project(
     })
 }
 
+/// Summary returned by [`move_project_workspace`] and exposed via
+/// [`crate::writer::WriterHandle::move_project_workspace`].
+#[derive(Debug, Default, Clone)]
+pub struct MoveSummary {
+    /// `pages` rows re-stamped (all versions, not just latest).
+    pub pages_moved: u64,
+    /// `sessions` rows re-stamped.
+    pub sessions_moved: u64,
+    /// `observations` rows re-stamped.
+    pub observations_moved: u64,
+    /// `handoffs` rows re-stamped.
+    pub handoffs_moved: u64,
+    /// `audit_log` rows re-stamped.
+    pub audit_log_moved: u64,
+}
+
+/// Re-stamp a project's `workspace_id` across every domain table in ONE
+/// transaction, keeping the same `project_id`. This is a lossless "true move":
+/// pages, sessions, observations, handoffs and supersession history all stay
+/// attached to the project — unlike a copy+purge, which drops everything but
+/// the latest pages.
+///
+/// `page_embeddings` and `links` are keyed by `page_id` (not `workspace_id`),
+/// so they follow automatically with no re-stamp.
+///
+/// The destination workspace row MUST already exist (FK on
+/// `projects.workspace_id`); the caller get-or-creates it first. A same-named
+/// project already living in the destination workspace makes the `projects`
+/// UPDATE violate `UNIQUE (workspace_id, name)` and the whole transaction
+/// rolls back — the caller must detect that merge case and route it through
+/// copy+purge instead.
+pub fn move_project_workspace(
+    conn: &mut Connection,
+    project_id: &ProjectId,
+    from_workspace: &WorkspaceId,
+    to_workspace: &WorkspaceId,
+) -> StoreResult<MoveSummary> {
+    let tx = conn.transaction()?;
+
+    let pid = project_id.as_bytes();
+    let from = from_workspace.as_bytes();
+    let to = to_workspace.as_bytes();
+
+    // Re-stamp child tables first (they carry the denormalized workspace_id),
+    // then the project row last. Order is irrelevant inside the transaction,
+    // but doing projects last keeps the UNIQUE(workspace_id, name) failure —
+    // the merge-collision signal — as the final, cheapest check.
+    let pages_moved = tx.execute(
+        "UPDATE pages SET workspace_id = ?1 WHERE project_id = ?2",
+        params![&to[..], &pid[..]],
+    )? as u64;
+    let sessions_moved = tx.execute(
+        "UPDATE sessions SET workspace_id = ?1 WHERE project_id = ?2",
+        params![&to[..], &pid[..]],
+    )? as u64;
+    let observations_moved = tx.execute(
+        "UPDATE observations SET workspace_id = ?1 WHERE project_id = ?2",
+        params![&to[..], &pid[..]],
+    )? as u64;
+    let handoffs_moved = tx.execute(
+        "UPDATE handoffs SET workspace_id = ?1 WHERE project_id = ?2",
+        params![&to[..], &pid[..]],
+    )? as u64;
+    let audit_log_moved = tx.execute(
+        "UPDATE audit_log SET workspace_id = ?1 WHERE project_id = ?2 AND workspace_id = ?3",
+        params![&to[..], &pid[..], &from[..]],
+    )? as u64;
+
+    let projects_updated = tx.execute(
+        "UPDATE projects SET workspace_id = ?1 WHERE id = ?2 AND workspace_id = ?3",
+        params![&to[..], &pid[..], &from[..]],
+    )?;
+    if projects_updated != 1 {
+        return Err(StoreError::NotFound(format!(
+            "project {project_id} not found in source workspace {from_workspace}"
+        )));
+    }
+
+    tx.commit()?;
+    Ok(MoveSummary {
+        pages_moved,
+        sessions_moved,
+        observations_moved,
+        handoffs_moved,
+        audit_log_moved,
+    })
+}
+
 /// Remove embedding rows in a workspace/project scope whose `(provider, model, dim)`
 /// does not match the configured triple, plus rows tied to superseded pages.
 pub fn delete_stale_page_embeddings(
@@ -1820,5 +1908,107 @@ mod tests {
             sql.contains("AFTER UPDATE OF title, body, path_search ON pages"),
             "pages_fts_au must not fire on access_count/last_accessed_at updates: {sql}"
         );
+    }
+
+    /// True move: re-stamping a project's workspace_id keeps the same
+    /// project_id and carries pages, sessions and observations along —
+    /// the whole point of the lossless move. The summary counts must
+    /// match what actually moved.
+    #[test]
+    fn move_project_workspace_restamps_all_domain_rows() {
+        use ai_memory_core::ObservationKind;
+
+        let (_tmp, mut conn, src_ws, proj) = fresh_db();
+        let dst_ws = get_or_create_workspace(&mut conn, "djalmajr").unwrap();
+
+        // Seed a page, a session and an observation under the source ws.
+        let page_id = upsert_page(&mut conn, &page(src_ws, proj, "notes/a.md", "body")).unwrap();
+        let sid = SessionId::new();
+        begin_session(
+            &mut conn,
+            &NewSession {
+                id: sid,
+                workspace_id: src_ws,
+                project_id: proj,
+                agent_kind: AgentKind::ClaudeCode,
+                cwd: None,
+            },
+        )
+        .unwrap();
+        insert_observation(
+            &mut conn,
+            &NewObservation {
+                session_id: sid,
+                workspace_id: src_ws,
+                project_id: proj,
+                kind: ObservationKind::UserPrompt,
+                extension: None,
+                source_event: None,
+                title: "t".into(),
+                body: "b".into(),
+                importance: 5,
+            },
+        )
+        .unwrap();
+
+        let summary = move_project_workspace(&mut conn, &proj, &src_ws, &dst_ws).unwrap();
+        assert_eq!(summary.pages_moved, 1);
+        assert_eq!(summary.sessions_moved, 1);
+        assert_eq!(summary.observations_moved, 1);
+
+        // The project_id is unchanged; every row now points at dst_ws.
+        // `projects` keys the project by `id`; child tables by `project_id`.
+        let count_in = |table: &str, ws: &ai_memory_core::WorkspaceId| -> i64 {
+            let id_col = if table == "projects" {
+                "id"
+            } else {
+                "project_id"
+            };
+            conn.query_row(
+                &format!("SELECT COUNT(*) FROM {table} WHERE {id_col} = ?1 AND workspace_id = ?2"),
+                params![&proj.as_bytes()[..], ws.as_bytes()],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        for table in ["projects", "pages", "sessions", "observations"] {
+            assert_eq!(count_in(table, &dst_ws), 1, "{table} must move to dst ws");
+            assert_eq!(count_in(table, &src_ws), 0, "{table} must leave src ws");
+        }
+        // The page keeps its id (embeddings/links follow via page_id).
+        let still_there: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pages WHERE id = ?1 AND workspace_id = ?2",
+                params![&page_id.as_bytes()[..], dst_ws.as_bytes()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(still_there, 1);
+    }
+
+    /// A same-named project already in the destination workspace makes the
+    /// projects UPDATE collide with UNIQUE(workspace_id, name); the whole
+    /// transaction must roll back, leaving the source intact. The admin
+    /// layer detects this merge case up front and routes it to copy+purge.
+    #[test]
+    fn move_project_workspace_rolls_back_on_name_collision() {
+        let (_tmp, mut conn, src_ws, proj) = fresh_db();
+        let dst_ws = get_or_create_workspace(&mut conn, "djalmajr").unwrap();
+        // Destination already holds a project named "scratch".
+        get_or_create_project(&mut conn, &dst_ws, "scratch", None).unwrap();
+        upsert_page(&mut conn, &page(src_ws, proj, "notes/a.md", "body")).unwrap();
+
+        let err = move_project_workspace(&mut conn, &proj, &src_ws, &dst_ws);
+        assert!(err.is_err(), "name collision must fail the move");
+
+        // Source rows untouched after rollback.
+        let src_pages: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pages WHERE project_id = ?1 AND workspace_id = ?2",
+                params![&proj.as_bytes()[..], src_ws.as_bytes()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(src_pages, 1, "rollback must preserve source pages");
     }
 }

@@ -80,6 +80,7 @@ async fn seed_page(store: &Store, wiki: &Wiki, ws: &str, project: &str, path: &s
         title: Some(path.into()),
         author_id: None,
         actor: ai_memory_core::ActorContext::anonymous(),
+        admission_ctx: None,
     })
     .await
     .unwrap();
@@ -89,11 +90,12 @@ async fn seed_page(store: &Store, wiki: &Wiki, ws: &str, project: &str, path: &s
 // Tests
 // ---------------------------------------------------------------------------
 
-/// Happy path: seed `src/proj` with two pages, move into `dst`, assert the
-/// pages now live under `dst/proj`, the source project + on-disk dir are
-/// gone, and the report counts add up.
+/// Happy path with a FRESH destination (no same-named project there): this is
+/// a lossless TRUE MOVE — the project_id is re-stamped into `dst`, nothing is
+/// purged, and the on-disk dir is renamed. Assert the pages now live under
+/// `dst/proj`, the source name no longer resolves, and the dir moved.
 #[tokio::test]
-async fn move_project_copies_then_purges_source() {
+async fn move_project_true_move_into_fresh_dest() {
     let tmp = TempDir::new().unwrap();
     let (state, store) = make_state(&tmp).await;
 
@@ -142,8 +144,28 @@ async fn move_project_copies_then_purges_source() {
 
     let body = body_json(resp).await;
     assert_eq!(body["pages_copied"].as_u64().unwrap_or(0), 2, "{body}");
-    assert_eq!(body["source_purged"], true, "{body}");
+    assert_eq!(body["moved_via"], "true-move", "{body}");
+    // Nothing is purged in a true move — the rows are re-stamped, not copied.
+    assert_eq!(body["source_purged"], false, "{body}");
     assert_eq!(body["merged_into_existing"], false, "{body}");
+
+    // project_id is preserved: the dst project IS the former src project.
+    let dst_ws_check = store
+        .reader
+        .find_workspace("dst".to_string())
+        .await
+        .unwrap()
+        .unwrap();
+    let dst_proj_check = store
+        .reader
+        .find_project(dst_ws_check, "proj".to_string())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        dst_proj_check, src_proj,
+        "true move keeps the same project_id"
+    );
 
     // Both pages now belong to dst/proj (latest), content preserved.
     let dst_pages = store.reader.list_pages("dst", "proj").await.unwrap();
@@ -257,6 +279,9 @@ async fn move_project_merges_into_existing_dest() {
 
     let body = body_json(resp).await;
     assert_eq!(body["merged_into_existing"], true, "{body}");
+    // A same-named project in the dest forces copy+purge (can't re-stamp two
+    // project_ids into one).
+    assert_eq!(body["moved_via"], "copy-purge", "{body}");
     assert_eq!(body["source_purged"], true, "{body}");
 
     // Destination holds BOTH the pre-existing and the moved page.
@@ -423,4 +448,91 @@ async fn move_project_carries_source_embedding() {
             dst[0].vector
         );
     }
+}
+
+/// The whole point of the true move over copy+purge: a session and its
+/// observation — episodic rows that copy+purge would DROP — survive a move
+/// into a fresh destination, re-stamped to the new workspace.
+#[tokio::test]
+async fn move_project_true_move_preserves_sessions_and_observations() {
+    use ai_memory_core::{AgentKind, NewObservation, NewSession, ObservationKind, SessionId};
+
+    let tmp = TempDir::new().unwrap();
+    let (state, store) = make_state(&tmp).await;
+    seed_page(&store, &state.wiki, "src", "proj", "notes/a.md", "body a").await;
+
+    let src_ws = store
+        .reader
+        .find_workspace("src".to_string())
+        .await
+        .unwrap()
+        .unwrap();
+    let src_proj = store
+        .reader
+        .find_project(src_ws, "proj".to_string())
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Seed an episodic session + observation under src/proj.
+    let sid = SessionId::new();
+    store
+        .writer
+        .begin_session(NewSession {
+            id: sid,
+            workspace_id: src_ws,
+            project_id: src_proj,
+            agent_kind: AgentKind::ClaudeCode,
+            cwd: None,
+        })
+        .await
+        .unwrap();
+    store
+        .writer
+        .insert_observation(NewObservation {
+            session_id: sid,
+            workspace_id: src_ws,
+            project_id: src_proj,
+            kind: ObservationKind::UserPrompt,
+            extension: None,
+            source_event: None,
+            title: "prompt".into(),
+            body: "do the thing".into(),
+            importance: 5,
+        })
+        .await
+        .unwrap();
+
+    let resp = post(
+        state,
+        "/admin/move-project",
+        json!({ "from_workspace": "src", "project": "proj", "to_workspace": "dst", "confirm": true }),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    assert_eq!(body["moved_via"], "true-move", "{body}");
+    assert_eq!(body["source_purged"], false, "{body}");
+
+    // The session followed the project to the new workspace (same session_id,
+    // same project_id, new workspace_id).
+    let dst_ws = store
+        .reader
+        .find_workspace("dst".to_string())
+        .await
+        .unwrap()
+        .unwrap();
+    let (sess_ws, sess_proj) = store
+        .reader
+        .session_project_ids(sid)
+        .await
+        .unwrap()
+        .expect("session must still exist after the move");
+    assert_eq!(sess_ws, dst_ws, "session re-stamped to dst workspace");
+    assert_eq!(sess_proj, src_proj, "session keeps its project_id");
+
+    // The observation survived and re-stamped too.
+    let obs = store.reader.observations_for_session(sid).await.unwrap();
+    assert_eq!(obs.len(), 1, "observation must survive the move");
+    assert_eq!(obs[0].workspace_id, dst_ws, "observation re-stamped to dst");
 }

@@ -20,7 +20,8 @@ struct MoveProjectRequest {
 ///
 /// Resolves the source project name (auto-derived from the git repo root
 /// when `--project` is omitted), requires `--confirm` before sending the
-/// request (it purges the source after copying), then prints the report.
+/// request (a true-move re-stamp or a copy+purge merge, both irreversible),
+/// then prints the report.
 ///
 /// # Errors
 /// Returns an error when `--confirm` is absent, the server is unreachable,
@@ -54,35 +55,38 @@ pub async fn run(config: &Config, args: MoveProjectArgs) -> Result<()> {
     )
     .await?;
 
-    let copied = report["pages_copied"].as_u64().unwrap_or(0);
+    let pages = report["pages_copied"].as_u64().unwrap_or(0);
     let purged = report["source_purged"].as_bool().unwrap_or(false);
-    let merged = report["merged_into_existing"].as_bool().unwrap_or(false);
-    println!(
-        "Moved {}/{} → {}/{}: {copied} pages copied{}{}.",
-        args.from_workspace,
-        project,
-        args.to_workspace,
-        project,
-        if merged {
-            " (merged into existing project)"
-        } else {
-            ""
-        },
-        if purged {
+    let moved_via = report["moved_via"].as_str().unwrap_or("");
+    let skipped_count = report["pages_skipped"].as_array().map_or(0, |s| s.len());
+
+    if moved_via == "true-move" {
+        // Lossless: re-stamped in place, nothing copied or purged.
+        println!(
+            "Moved {}/{} → {}/{}: {pages} pages re-stamped (true move — \
+             sessions, observations and history preserved).",
+            args.from_workspace, project, args.to_workspace, project,
+        );
+    } else {
+        // copy-purge (merge into an existing same-named project).
+        let tail = if skipped_count > 0 {
+            ", SOURCE LEFT INTACT (some pages unreadable — fix and re-run)"
+        } else if purged {
             ", source purged"
         } else {
             ", SOURCE LEFT INTACT (partial copy)"
-        },
-    );
-
-    if let Some(skipped) = report["pages_skipped"].as_array()
-        && !skipped.is_empty()
-    {
+        };
         println!(
-            "Warning: {} page(s) could not be read from the source and were \
-             skipped; the source was NOT purged. Fix and re-run.",
-            skipped.len()
+            "Moved {}/{} → {}/{}: {pages} pages copied (merged into existing \
+             project){tail}.",
+            args.from_workspace, project, args.to_workspace, project,
         );
+        if skipped_count > 0 {
+            println!(
+                "Warning: {skipped_count} page(s) could not be read from the \
+                 source and were skipped; the source was NOT purged. Fix and re-run.",
+            );
+        }
     }
     Ok(())
 }

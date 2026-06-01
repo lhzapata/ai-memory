@@ -96,11 +96,12 @@ pub enum Command {
     /// Useful after renaming the project's directory on disk so the hook
     /// router keeps writing into the same logical project.
     RenameProject(RenameProjectArgs),
-    /// Move a project into another workspace. Copies every latest page into
-    /// the destination (a NEW project, or MERGES into an existing same-named
-    /// one) through the normal write path, then PURGES the source. The
-    /// source-side purge is irreversible — requires `--confirm`. Note:
-    /// sessions/observations/handoffs do NOT migrate (only durable pages).
+    /// Move a project into another workspace. A fresh destination is a
+    /// lossless TRUE MOVE (re-stamp workspace_id, keep project_id, rename the
+    /// dir) — sessions/observations/handoffs and history all survive. A
+    /// destination that already holds a same-named project MERGES via
+    /// copy+purge (only durable pages migrate, source purged). Either way the
+    /// operation is irreversible — requires `--confirm`.
     MoveProject(MoveProjectArgs),
     /// Remove ai-memory's wiring (hooks, MCP, instructions) from all
     /// detected agents. Dry-run unless `--apply`.
@@ -360,8 +361,8 @@ pub struct MoveProjectArgs {
     /// Destination workspace. Auto-created if it doesn't exist.
     #[arg(long)]
     pub to_workspace: String,
-    /// REQUIRED — the move PURGES the source project after copying.
-    /// Without this flag the CLI errors out.
+    /// REQUIRED — the move re-stamps (true-move) or copies+purges (merge) the
+    /// source, both irreversible. Without this flag the CLI errors out.
     #[arg(long)]
     pub confirm: bool,
 }

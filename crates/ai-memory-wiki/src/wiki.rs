@@ -170,6 +170,41 @@ impl Wiki {
             .join(project_id.to_string())
     }
 
+    /// Move a project's on-disk directory from one workspace to another,
+    /// keeping the same `project_id` segment:
+    /// `<wiki_root>/<from_ws>/<proj>` → `<wiki_root>/<to_ws>/<proj>`.
+    ///
+    /// Both paths share the same `<wiki_root>`, so `fs::rename` is an atomic
+    /// metadata-only operation on every supported filesystem — no per-file
+    /// copy, no re-embed. The destination workspace directory is created
+    /// first. This pairs with
+    /// [`WriterHandle::move_project_workspace`](ai_memory_store) — callers
+    /// re-stamp SQLite first, then call this to land the files at the path the
+    /// re-stamped rows already point at, so the watcher's own-write
+    /// short-circuit absorbs the resulting events.
+    ///
+    /// # Errors
+    /// Propagates [`WikiError::Io`] if the destination already exists or the
+    /// rename fails (e.g. cross-device, which cannot happen within one root).
+    pub fn rename_project_dir(
+        &self,
+        project_id: ProjectId,
+        from_workspace: WorkspaceId,
+        to_workspace: WorkspaceId,
+    ) -> WikiResult<()> {
+        let src = self.project_root(from_workspace, project_id);
+        if !src.exists() {
+            // Nothing on disk to move (a project with zero written pages).
+            return Ok(());
+        }
+        let dst = self.project_root(to_workspace, project_id);
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::rename(&src, &dst)?;
+        Ok(())
+    }
+
     /// Absolute on-disk path for a page within a specific project.
     #[must_use]
     pub fn abs_path(

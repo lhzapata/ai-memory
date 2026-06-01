@@ -1610,7 +1610,17 @@ pub struct MoveProjectReport {
     /// `true` when the destination workspace already held a same-named
     /// project — the copy MERGED into it rather than creating a fresh one.
     pub merged_into_existing: bool,
-    /// Number of latest pages copied into the destination.
+    /// How the move was performed:
+    /// - `"true-move"`: a lossless cross-workspace re-stamp (same `project_id`,
+    ///   one SQL transaction + one dir rename). Used when the destination has
+    ///   no same-named project. Sessions/observations/handoffs and the full
+    ///   supersession history all survive; nothing is re-embedded.
+    /// - `"copy-purge"`: the destination already held a same-named project, so
+    ///   the source's latest pages were copied in and merged, then the source
+    ///   purged. Only durable pages move; episodic rows are dropped.
+    pub moved_via: &'static str,
+    /// Number of latest pages copied into the destination (copy-purge) or
+    /// re-stamped in place (true-move).
     pub pages_copied: u64,
     /// Source paths whose on-disk file could not be read (copy skipped).
     /// When non-empty the source is NOT purged so a fixed re-run is safe.
@@ -1631,6 +1641,95 @@ pub struct MoveProjectReport {
     pub files_deleted: Vec<String>,
     /// Source on-disk dirs that could not be removed (non-fatal).
     pub files_failed: Vec<String>,
+}
+
+/// Lossless cross-workspace move: re-stamp the source project's
+/// `workspace_id` across every domain table (one transaction, same
+/// `project_id`), then rename its on-disk dir to the destination workspace.
+/// The caller has already verified the destination has no same-named project.
+///
+/// Ordering matters: the SQL re-stamp commits FIRST, then the dir is renamed.
+/// When the rename fires filesystem events at the new path, the watcher
+/// re-derives `(workspace_id, project_id)` from the path — which now matches
+/// what the DB already holds — so the upsert is a sha256 no-op. Renaming
+/// before the commit would briefly expose new-path files whose derived
+/// workspace disagrees with the DB.
+async fn true_move_project(
+    state: &Arc<AdminState>,
+    req: &MoveProjectRequest,
+    src_ws: WorkspaceId,
+    src_proj: ProjectId,
+) -> (StatusCode, Json<serde_json::Value>) {
+    // Ensure the destination workspace ROW exists (FK target for the
+    // re-stamp) without creating a new project — the existing project_id is
+    // what we move.
+    let dst_ws = match state
+        .writer
+        .get_or_create_workspace(req.to_workspace.clone())
+        .await
+    {
+        Ok(ws) => ws,
+        Err(e) => return internal_err(e.to_string()),
+    };
+
+    let summary = match state
+        .writer
+        .move_project_workspace(src_proj, src_ws, dst_ws)
+        .await
+    {
+        Ok(s) => s,
+        Err(StoreError::NotFound(msg)) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": msg })),
+            );
+        }
+        Err(e) => return internal_err(e.to_string()),
+    };
+
+    // Land the files where the re-stamped rows now point. The SQL is already
+    // committed; a rename failure leaves the DB ahead of disk (the one
+    // inconsistency window) and is an exceptional fs error, not a normal path.
+    if let Err(e) = state.wiki.rename_project_dir(src_proj, src_ws, dst_ws) {
+        let src_dir = state.wiki.project_root(src_ws, src_proj);
+        let dst_dir = state.wiki.project_root(dst_ws, src_proj);
+        warn!(
+            error = %e,
+            src = %src_dir.display(),
+            dst = %dst_dir.display(),
+            "true-move: SQL re-stamp committed but dir rename failed; \
+             move the directory manually to reconcile"
+        );
+        return internal_err(format!(
+            "project rows moved but on-disk dir rename failed: {e}; \
+             manually move {} -> {}",
+            src_dir.display(),
+            dst_dir.display()
+        ));
+    }
+
+    let report = MoveProjectReport {
+        from: format!("{}/{}", req.from_workspace, req.project),
+        to: format!("{}/{}", req.to_workspace, req.project),
+        merged_into_existing: false,
+        moved_via: "true-move",
+        pages_copied: summary.pages_moved,
+        pages_skipped: Vec::new(),
+        // Nothing is purged in a true move — the source rows ARE the
+        // destination rows, just re-stamped.
+        source_purged: false,
+        source_pages_deleted: 0,
+        source_sessions_deleted: 0,
+        source_observations_deleted: 0,
+        source_handoffs_deleted: 0,
+        source_embeddings_deleted: 0,
+        files_deleted: Vec::new(),
+        files_failed: Vec::new(),
+    };
+    (
+        StatusCode::OK,
+        Json(serde_json::to_value(&report).unwrap_or_else(|_| serde_json::json!({}))),
+    )
 }
 
 async fn handle_move_project(
@@ -1677,8 +1776,21 @@ async fn handle_move_project(
         Err(e) => return internal_err(e.to_string()),
     };
 
-    // Get-or-create the DESTINATION (new ProjectId unless merging). Also
-    // auto-creates the destination workspace.
+    // FRESH destination (no same-named project there) → lossless TRUE MOVE.
+    // Re-stamp the source project's workspace_id across every domain table in
+    // one transaction (same project_id), then rename its on-disk dir. This
+    // keeps sessions/observations/handoffs and the full supersession history,
+    // and is O(1) instead of O(pages) — no per-page re-write, re-embed, or
+    // admission webhook. The copy+purge path below is reserved for the MERGE
+    // case, where two project_ids can't be re-stamped into one
+    // (UNIQUE(workspace_id, name) collision).
+    if !merged_into_existing {
+        return true_move_project(&state, &req, src_ws, src_proj).await;
+    }
+
+    // MERGE: the destination already holds a same-named project. Get-or-create
+    // it (auto-creating the destination workspace) and copy the source's
+    // latest pages into it, then purge the source.
     let (dst_ws, dst_proj) = match resolve_ws_proj(&state, &req.to_workspace, &req.project).await {
         Ok(ids) => ids,
         Err(e) => return e,
@@ -1771,6 +1883,7 @@ async fn handle_move_project(
                 title: Some(s.title.clone()),
                 author_id: None,
                 actor: ai_memory_core::ActorContext::anonymous(),
+                admission_ctx: None,
             })
             .await
         {
@@ -1806,6 +1919,7 @@ async fn handle_move_project(
             from: format!("{}/{}", req.from_workspace, req.project),
             to: format!("{}/{}", req.to_workspace, req.project),
             merged_into_existing,
+            moved_via: "copy-purge",
             pages_copied,
             pages_skipped,
             source_purged: false,
@@ -1849,6 +1963,7 @@ async fn handle_move_project(
         from: label,
         to: format!("{}/{}", req.to_workspace, req.project),
         merged_into_existing,
+        moved_via: "copy-purge",
         pages_copied,
         pages_skipped: Vec::new(),
         source_purged: true,

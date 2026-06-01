@@ -10,7 +10,7 @@ on a homelab box where mistakes are harder to undo.
 |---|---|---|---|---|
 | `purge-project --confirm` | ✅ yes | the one project's data | no | Atomic `rm -rf <project_root>` on the namespaced disk path; sibling projects untouched. |
 | `rename-project --from --to` | ✅ yes | no | yes (rename back) | Column-only update on `projects.name`. The on-disk dir is keyed by `project_id` (UUID), so the rename never moves a file. |
-| `move-project --confirm` | ✅ yes | the source project (after copy) | no | Copies every latest page into the destination workspace via the write path, then purges the source. Sessions/observations/handoffs do **not** migrate. |
+| `move-project --confirm` | ✅ yes | source only in the merge case | no | Fresh destination → lossless **true move** (re-stamp `workspace_id`, keep `project_id`, rename the dir): sessions/observations/handoffs + history all survive. Destination with a same-named project → **copy+purge merge**: only latest pages migrate. |
 | `backup --output-path` | ✅ yes | no | n/a | Streams a gzipped tarball from the server's online `sqlite3 .backup` plus the wiki tree. Safe alongside the live writer. |
 | `restore --from <tarball>` | ❌ **stop the server first** | overwrites the data dir | no (without prior backup) | Refuses if any sibling `ai-memory` process is alive (sysinfo guard). |
 | `reset --confirm` | ❌ **stop the server first** | yes, all data | no | Refuses if any sibling `ai-memory` process is alive (sysinfo guard). |
@@ -128,39 +128,67 @@ ai-memory move-project --from-workspace default --project my-project \
 ```
 
 Moves a project into a **different** workspace. Unlike `rename-project`
-(a same-workspace column update), this crosses the workspace boundary,
-so it is implemented as a copy-then-purge through the normal write path
-rather than a low-level re-stamp:
+(a same-workspace column update), this crosses the workspace boundary.
+The destination decides which of two strategies runs — reported as
+`moved_via` in the response:
+
+**1. Fresh destination → `"true-move"` (lossless, the common case).**
+When the destination workspace has **no** same-named project, the move is
+a low-level re-stamp:
 
 1. Resolve the source `(from_workspace, project)`. 404 on miss.
 2. Reject `from_workspace == to_workspace` (use `rename-project`) → 422.
-3. Get-or-create `(to_workspace, project)`. If that workspace already
-   holds a same-named project, the copy **merges** into it
-   (`merged_into_existing: true` in the report); otherwise a fresh
-   `project_id` is created (a true move).
-4. For each latest page of the source, copy it into the destination via
-   `Wiki::write_page` — so sanitization, link re-resolution, FTS, and
-   (on deploy) the admission/git-mirror webhooks all fire naturally.
-5. **Only after every page copied successfully**, purge the source
-   project (cascade-delete its rows + remove its on-disk dir).
+3. Get-or-create the destination **workspace** row (not a new project).
+4. Re-stamp `workspace_id` across every domain table for the project in
+   **one transaction**, keeping the same `project_id`
+   (`projects`, `pages`, `sessions`, `observations`, `handoffs`,
+   `audit_log`). `page_embeddings` and `links` are keyed by `page_id`, so
+   they follow with no re-stamp.
+5. `fs::rename` the project dir
+   `<wiki>/<from_ws>/<proj>` → `<wiki>/<to_ws>/<proj>` (atomic within one
+   wiki root). SQL commits **before** the rename, so when the watcher sees
+   the new-path events it re-derives the same `(ws, proj)` the DB already
+   holds and the reindex is a sha256 no-op.
 
-Safety: copy-before-purge means any copy failure aborts **before** the
-purge, leaving the source intact. An unreadable source file is skipped
-and also blocks the purge (`source_purged: false`) so a fixed re-run is
-safe (re-running is idempotent — copied pages just supersede).
+This is O(1) (one transaction + one rename), re-embeds nothing, and
+**preserves everything** — sessions, observations, handoffs and the full
+supersession history all travel with the project.
 
-**What does NOT migrate:** only durable wiki pages move. The source's
-`sessions`, `observations`, and `handoffs` (the raw episodic capture
-log) are destroyed by the purge and are not recreated under the
-destination. The page version history in SQLite resets (the moved pages
-start a fresh supersession chain); the real page history lives in the
-wiki's git mirror.
+**2. Destination already has a same-named project → `"copy-purge"`
+(merge).** Two distinct `project_id`s can't be re-stamped into one (it
+would collide on `UNIQUE (workspace_id, name)`), so the source's latest
+pages are copied into the existing destination project via
+`Wiki::write_page` (sanitization, link re-resolution, FTS, and — on
+deploy — the admission/git-mirror webhooks all fire), source embeddings
+are carried over verbatim, and only then is the source purged
+(`merged_into_existing: true`, `source_purged: true`).
+
+Copy-before-purge means any copy failure aborts **before** the purge,
+leaving the source intact. An unreadable source file is skipped and also
+blocks the purge (`source_purged: false`) so a fixed re-run is safe
+(re-running is idempotent — copied pages just supersede).
+
+**What does NOT migrate (merge case only):** in the `copy-purge` path the
+source's `sessions`, `observations`, and `handoffs` (the raw episodic
+capture log) are dropped by the purge, and the moved pages start a fresh
+supersession chain (the real page history lives in the wiki's git
+mirror). The `true-move` path has no such loss.
+
+> **Operational caveat — moving the project the current session writes
+> to.** Lifecycle hooks stamp an observation on every tool call into the
+> session's project. If you move that very project mid-session, the next
+> hook re-creates the source (`scratch`-style) under the old workspace.
+> Before moving a live project, point the repo's `.ai-memory.toml` at the
+> **destination** workspace first, so new hook events already land there
+> and the move is a clean no-contention operation.
 
 Failure modes:
 
 - **Missing `--confirm`** → 400.
 - **`from_workspace == to_workspace`** → 422 (use `rename-project`).
 - **Source project not found** → 404.
+- **Re-stamp committed but dir rename failed** (true-move, exceptional fs
+  error) → 500 with the exact `mv <src> <dst>` to run to reconcile.
 
 ### `backup`
 
