@@ -307,10 +307,13 @@ The bearer token continues to authenticate at the wire level; users
 created via `ai-memory user add` get their own tokens that resolve to
 their identity in audit logs (and, in subsequent milestones, page
 frontmatter + the web UI). Data stays single-tenant — there is no
-RBAC. Existing single-user installs are not affected unless you opt
-in by setting `[auth].token_pepper` (auto-generated for new installs
-by `ai-memory init`). See [`docs/users.md`](docs/users.md) for the
-full walkthrough and the four-rung auth ladder.
+per-page RBAC — but once `[auth].token_pepper` enables multi-user
+mode, operational `/admin/*` endpoints such as backup, purge, move,
+embed, and commit require the root token. Existing single-user installs
+are not affected unless you opt in by setting `[auth].token_pepper`
+(auto-generated for new installs by `ai-memory init`). See
+[`docs/users.md`](docs/users.md) for the full walkthrough and the
+four-rung auth ladder.
 
 See [`docs/deploy.md`](docs/deploy.md) for the full homelab pattern
 with bearer auth, host allowlisting, and TLS/reverse-proxy options.

@@ -11,7 +11,7 @@ use tracing::debug;
 
 use crate::embedding::{Embedder, normalise};
 use crate::error::{LlmError, LlmResult};
-use crate::text::truncate_with_ellipsis;
+use crate::response::{provider_error_body, response_json_limited};
 
 /// Default Gemini API host.
 pub const DEFAULT_BASE_URL: &str = "https://generativelanguage.googleapis.com";
@@ -106,13 +106,13 @@ impl GoogleEmbedder {
                 continue;
             }
             if !status.is_success() {
-                let body_text = resp.text().await.unwrap_or_default();
+                let body = provider_error_body(resp).await;
                 return Err(LlmError::Provider {
                     status: status.as_u16(),
-                    body: truncate_with_ellipsis(&body_text, 1024),
+                    body,
                 });
             }
-            let parsed: GeminiEmbedResponse = resp.json().await?;
+            let parsed: GeminiEmbedResponse = response_json_limited(resp).await?;
             let values = parsed.embedding.values;
             if values.len() as u32 != self.dim {
                 return Err(LlmError::UnexpectedShape(format!(

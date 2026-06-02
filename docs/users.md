@@ -7,10 +7,12 @@
 
 ai-memory is **single-tenant data** with **optional multi-user
 attribution**. Every authenticated request sees the same wiki pages —
-there is no RBAC, no per-user scoping, no group permissions. What
-multi-user mode adds is *who-did-this*: every write attributes to a
-named user, audit-log rows carry that identity, and the web UI can
-show "Last edited by Alice Smith" instead of the anonymous default.
+there is no per-page RBAC, no per-user data scoping, no group
+permissions. What multi-user mode adds is *who-did-this*: every write
+attributes to a named user, audit-log rows carry that identity, and the
+web UI can show "Last edited by Alice Smith" instead of the anonymous
+default. Operational `/admin/*` endpoints stay root-only once
+multi-user mode is configured.
 
 If you run ai-memory alone, you can skip this page — your install
 keeps working unchanged.
@@ -47,7 +49,7 @@ Every HTTP request is resolved to one of four authentication tiers:
 |---|---|---|
 | **0 — Anonymous** | No `[auth].bearer_token` set. | Allowed, no identity. Same as pre-multi-user defaults. |
 | **1 — Root** | Bearer matches `[auth].bearer_token`. | Allowed as **root**. When `[auth].root_username` is set, writes attribute to that name; otherwise attribution stays anonymous. |
-| **2 — DB user** | Bearer doesn't match root, matches a `users.token_hash` row (via SHA-256 of token + `[auth].token_pepper`). | Allowed as **that user**. The audit log records the username/email/name. |
+| **2 — DB user** | Bearer doesn't match root, matches a `users.token_hash` row (via SHA-256 of token + `[auth].token_pepper`). | Allowed as **that user** for normal read/write APIs. Operational `/admin/*` endpoints are root-only in multi-user mode. The audit log records the username/email/name. |
 | **3 — 401** | Bearer present but matches nothing. | Rejected. Closes the bypass — unknown bearers can't slip through as anonymous. |
 
 The rungs are sticky: a request is matched at the lowest tier that
@@ -170,6 +172,10 @@ If you're upgrading from a pre-v0.8 ai-memory:
   user-management endpoints return **503** with a clear
   `multi-user not enabled` message. Existing installs never trip
   this because they never call `user add`.
+- Operational `/admin/*` endpoints are open to the configured bearer
+  token in single-user mode, matching historical behavior. After you
+  configure `[auth].token_pepper`, those endpoints require the root
+  token; DB-user tokens receive **403**.
 
 ### Migrating an existing single-user install
 
@@ -268,18 +274,17 @@ the bearer authenticates, attribution flows from the token's owner
 
 ## Limitations
 
-- **No RBAC.** Every authenticated user sees every page in the
-  workspace. If you need data isolation, run separate ai-memory
-  servers (per-user data dirs) and front them with a reverse
+- **No per-page RBAC.** Every authenticated user sees every page in
+  the workspace. Operational `/admin/*` endpoints are still root-only
+  in multi-user mode. If you need data isolation, run separate
+  ai-memory servers (per-user data dirs) and front them with a reverse
   proxy.
 - **One token per user.** Rotation issues a new token and
   invalidates the old in the same transaction. There's no
   notion of multiple device-bound tokens per user.
-- **Root token is single.** `[auth].bearer_token` is a single
-  scalar. If you want multiple "admin"-class users, add them via
-  `user add` and accept that they currently have the same
-  capabilities as the root token for everything *except*
-  user-management endpoints, which stay root-only.
+- **Root token is single.** `[auth].bearer_token` is the admin token
+  for operational `/admin/*` endpoints. DB users created with
+  `user add` are normal users, not additional admins.
 - **No federation / OIDC / OAuth.** Per
   [`design-decisions.md`](design-decisions.md) §13, ai-memory v1
   stays self-contained. If you need SSO, terminate it at a

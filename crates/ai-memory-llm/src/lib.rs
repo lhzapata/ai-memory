@@ -42,6 +42,7 @@ pub mod provider;
 pub mod types;
 
 mod auth_file;
+mod response;
 mod text;
 
 pub use anthropic::AnthropicProvider;

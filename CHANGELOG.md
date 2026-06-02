@@ -42,6 +42,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before removal ([#55]).
 
 ### Fixed
+- Backups no longer dereference symlinks under `wiki/`, preventing a planted
+  wiki symlink from pulling arbitrary readable host-file contents into
+  `backup.tar.gz`.
+- `ai-memory restore` now validates tar entries before extraction and accepts
+  only regular files/directories under the expected backup paths
+  (`wiki/`, `db/memory.sqlite`, and `config.toml`), rejecting links, special
+  files, unsafe paths, and unexpected archive entries.
+- In multi-user mode (`[auth].token_pepper` configured), operational
+  `/admin/*` endpoints now require the root token; DB-user tokens receive
+  403 while single-user installs keep the historical permissive admin behavior.
+- LLM provider clients now cap provider response bodies before JSON, text, or
+  SSE parsing, and truncate error bodies from bounded buffers instead of
+  buffering arbitrary-size responses.
+- Non-blocking admission webhooks now have a process-level in-flight cap and
+  webhook timeouts are clamped to a safe maximum, preventing observer hooks
+  from growing unbounded background work during write bursts.
+- Hook cwd/project resolution caching is now bounded with LRU-style eviction,
+  preventing unbounded process-lifetime growth from streams of unique cwd
+  values.
 - `memory_write_page` tool description and routing prompts now steer agents
   toward writing the page title as a `# H1` on the first line of `body` and
   omitting the `title` argument. ai-memory already auto-derived the title from

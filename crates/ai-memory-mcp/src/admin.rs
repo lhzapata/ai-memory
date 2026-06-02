@@ -45,6 +45,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
+use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use flate2::Compression;
@@ -160,7 +161,8 @@ fn default_chunk_input_tokens() -> usize {
 /// - `POST /admin/move-project`
 /// - `POST /admin/write-page`
 pub fn admin_router(state: AdminState) -> Router {
-    Router::new()
+    let state = Arc::new(state);
+    let operational = Router::new()
         .route("/admin/backup", post(handle_backup))
         .route("/admin/bootstrap", post(handle_bootstrap))
         .route("/admin/status", get(handle_status))
@@ -175,6 +177,11 @@ pub fn admin_router(state: AdminState) -> Router {
         .route("/admin/rename-project", post(handle_rename_project))
         .route("/admin/move-project", post(handle_move_project))
         .route("/admin/write-page", post(handle_write_page))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            require_root_for_multiuser_admin,
+        ));
+    let users = Router::new()
         .route(
             "/admin/users",
             get(handle_list_users).post(handle_create_user),
@@ -184,8 +191,38 @@ pub fn admin_router(state: AdminState) -> Router {
         .route(
             "/admin/users/{username}/rotate-token",
             post(handle_rotate_user_token),
-        )
-        .with_state(Arc::new(state))
+        );
+    operational.merge(users).with_state(state)
+}
+
+async fn require_root_for_multiuser_admin(
+    State(state): State<Arc<AdminState>>,
+    req: axum::http::Request<Body>,
+    next: Next,
+) -> Response {
+    if state.token_pepper.is_none() {
+        return next.run(req).await;
+    }
+    let level = req
+        .extensions()
+        .get::<ai_memory_core::AuthLevel>()
+        .copied()
+        .unwrap_or(ai_memory_core::AuthLevel::Anonymous);
+    if level.is_root() {
+        return next.run(req).await;
+    }
+    let (code, msg) = match level {
+        ai_memory_core::AuthLevel::Anonymous => (
+            StatusCode::UNAUTHORIZED,
+            "admin operation requires authentication in multi-user mode",
+        ),
+        ai_memory_core::AuthLevel::User => (
+            StatusCode::FORBIDDEN,
+            "admin operation is root-only in multi-user mode",
+        ),
+        ai_memory_core::AuthLevel::Root => unreachable!("guarded above"),
+    };
+    (code, Json(serde_json::json!({ "error": msg }))).into_response()
 }
 
 // ---------------------------------------------------------------------
@@ -247,6 +284,7 @@ async fn build_backup_tarball_file(state: &AdminState) -> anyhow::Result<tokio::
         let encoder = GzEncoder::new(&mut tar_file, Compression::default());
         let mut tar = tar::Builder::new(encoder);
         tar.mode(tar::HeaderMode::Deterministic);
+        tar.follow_symlinks(false);
 
         let wiki_dir = state.data_dir.join("wiki");
         if wiki_dir.is_dir() {
@@ -3186,6 +3224,136 @@ mod tests {
             )
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn multiuser_operational_admin_routes_reject_db_user_tier() {
+        let (_tmp, router) = user_admin_test_router("root-token");
+        let routes = [
+            ("POST", "/admin/backup", serde_json::Value::Null),
+            (
+                "POST",
+                "/admin/bootstrap",
+                serde_json::json!({
+                    "workspace": "default",
+                    "project": "scratch",
+                    "sources": [],
+                    "dry_run": true
+                }),
+            ),
+            ("GET", "/admin/status", serde_json::Value::Null),
+            ("GET", "/admin/search?q=test", serde_json::Value::Null),
+            (
+                "GET",
+                "/admin/read-page?workspace=default&project=scratch&path=notes/x.md",
+                serde_json::Value::Null,
+            ),
+            ("POST", "/admin/reorg", serde_json::json!({"dry_run": true})),
+            (
+                "POST",
+                "/admin/lint",
+                serde_json::json!({"workspace": "default", "project": "scratch", "dry_run": true}),
+            ),
+            (
+                "POST",
+                "/admin/forget-sweep",
+                serde_json::json!({"workspace": "default", "project": "scratch", "dry_run": true}),
+            ),
+            (
+                "POST",
+                "/admin/embed",
+                serde_json::json!({"workspace": "default", "project": "scratch", "dry_run": true}),
+            ),
+            (
+                "POST",
+                "/admin/commit",
+                serde_json::json!({"message": "test"}),
+            ),
+            (
+                "POST",
+                "/admin/purge-project",
+                serde_json::json!({"workspace": "default", "project": "scratch", "confirm": true}),
+            ),
+            (
+                "POST",
+                "/admin/rename-project",
+                serde_json::json!({"workspace": "default", "from": "scratch", "to": "renamed"}),
+            ),
+            (
+                "POST",
+                "/admin/move-project",
+                serde_json::json!({
+                    "from_workspace": "default",
+                    "to_workspace": "archive",
+                    "project": "scratch",
+                    "confirm": true
+                }),
+            ),
+            (
+                "POST",
+                "/admin/write-page",
+                serde_json::json!({
+                    "workspace": "default",
+                    "project": "scratch",
+                    "path": "notes/x.md",
+                    "body": "body"
+                }),
+            ),
+        ];
+
+        for (method, uri, payload) in routes {
+            let mut builder = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("authorization", "Bearer db-user-token");
+            let body = if payload.is_null() {
+                Body::empty()
+            } else {
+                builder = builder.header("content-type", "application/json");
+                Body::from(serde_json::to_vec(&payload).unwrap())
+            };
+            let resp = router
+                .clone()
+                .oneshot(builder.body(body).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::FORBIDDEN,
+                "{method} {uri} must be root-only in multi-user mode"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn multiuser_operational_admin_routes_reject_anonymous() {
+        let (_tmp, router) = user_admin_test_router("root-token");
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn multiuser_operational_admin_routes_allow_root() {
+        let (_tmp, router) = user_admin_test_router("root-token");
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/status")
+                    .header("authorization", "Bearer root-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]

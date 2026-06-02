@@ -19,6 +19,7 @@ use crate::auth_file::{load_entry, now_ms, save_entry};
 use crate::error::{LlmError, LlmResult};
 use crate::openai::{STRUCTURED_OUTPUT_SCHEMA_NAME, enforce_strict_object_schemas};
 use crate::provider::LlmProvider;
+use crate::response::{provider_error_body, response_json_limited, response_text_limited};
 use crate::text::truncate_with_ellipsis;
 use crate::types::{ChatRequest, ChatResponse, Role, Usage};
 
@@ -241,18 +242,16 @@ impl OpenAiOAuthProvider {
         let resp = request.send().await.map_err(LlmError::from)?;
         let status = resp.status();
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
+            let body = provider_error_body(resp).await;
             return Err(LlmError::Provider {
                 status: status.as_u16(),
-                body: truncate_with_ellipsis(&body, 1024),
+                body,
             });
         }
         if body.stream {
-            parse_sse_response(&resp.text().await.map_err(LlmError::from)?)
+            parse_sse_response(&response_text_limited(resp).await?)
         } else {
-            resp.json::<CodexResponsesResponse>()
-                .await
-                .map_err(LlmError::from)
+            response_json_limited::<CodexResponsesResponse>(resp).await
         }
     }
 }
@@ -312,15 +311,12 @@ async fn refresh_access_token(
         .map_err(LlmError::from)?;
     let status = resp.status();
     if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
+        let body = provider_error_body(resp).await;
         return Err(LlmError::Auth(format!(
             "openai-oauth refresh failed ({status}): {body}. Run `ai-memory auth login openai-oauth` again."
         )));
     }
-    let token_response = resp
-        .json::<OpenAiOAuthTokenResponse>()
-        .await
-        .map_err(LlmError::from)?;
+    let token_response = response_json_limited::<OpenAiOAuthTokenResponse>(resp).await?;
     Ok(OpenAiOAuthToken::from_token_response(
         token_response.access_token,
         token_response

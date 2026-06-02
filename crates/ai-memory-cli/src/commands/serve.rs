@@ -7,7 +7,9 @@ use std::time::Duration;
 
 use ai_memory_consolidate::{Consolidator, run_lint, run_sweep};
 use ai_memory_core::{ActiveProject, ProjectId, Sanitizer, WorkspaceId};
-use ai_memory_hooks::{DEFAULT_HOOK_INGEST_MAX_IN_FLIGHT, HookState, hook_router};
+use ai_memory_hooks::{
+    DEFAULT_HOOK_INGEST_MAX_IN_FLIGHT, HookState, ProjectCacheStore, hook_router,
+};
 use ai_memory_llm::{Embedder, LlmProvider, ProviderHealth, build_embedder, build_provider};
 use ai_memory_mcp::{AdminState, AiMemoryServer, admin_router};
 use ai_memory_store::{EmbeddingWrite, ReaderPool, Store, WriterHandle, f32_vec_to_bytes};
@@ -196,7 +198,7 @@ pub async fn run(config: &Config, args: ServeArgs) -> Result<()> {
             // router gets a fire-and-forget eviction hook so a `move-project`
             // can proactively drop the moved project's stale entries.
             let project_cache: ai_memory_hooks::ProjectCache =
-                std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+                std::sync::Arc::new(tokio::sync::Mutex::new(ProjectCacheStore::default()));
             let on_project_moved: std::sync::Arc<dyn Fn(ProjectId) + Send + Sync> = {
                 let cache = project_cache.clone();
                 std::sync::Arc::new(move |proj: ProjectId| {

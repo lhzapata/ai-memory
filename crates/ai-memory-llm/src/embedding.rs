@@ -21,6 +21,7 @@ use tracing::debug;
 
 use crate::error::{LlmError, LlmResult};
 use crate::openai::normalize_openai_base;
+use crate::response::{provider_error_body, response_json_limited, response_text_limited};
 use crate::text::{truncate_for_embedding, truncate_with_ellipsis};
 
 /// Conservative per-request input cap for OpenAI-compatible embedding APIs
@@ -229,20 +230,20 @@ impl Embedder for OpenAiEmbedder {
             }
             // Client errors (e.g. input > 8192 tokens) are not retried.
             if status.as_u16() == 400 {
-                let body = resp.text().await.unwrap_or_default();
+                let body = provider_error_body(resp).await;
                 return Err(LlmError::Provider {
                     status: status.as_u16(),
-                    body: truncate_with_ellipsis(&body, 1024),
+                    body,
                 });
             }
             if !status.is_success() {
-                let body = resp.text().await.unwrap_or_default();
+                let body = provider_error_body(resp).await;
                 return Err(LlmError::Provider {
                     status: status.as_u16(),
-                    body: truncate_with_ellipsis(&body, 1024),
+                    body,
                 });
             }
-            let body = resp.text().await.unwrap_or_default();
+            let body = response_text_limited(resp).await?;
             let values = parse_openai_embedding_values(&body, status.as_u16())?;
             if values.len() as u32 != self.dim {
                 return Err(LlmError::UnexpectedShape(format!(
@@ -341,13 +342,13 @@ impl Embedder for VoyageEmbedder {
             .await?;
         let status = resp.status();
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
+            let body = provider_error_body(resp).await;
             return Err(LlmError::Provider {
                 status: status.as_u16(),
-                body: truncate_with_ellipsis(&body, 1024),
+                body,
             });
         }
-        let parsed: VoyageResponse = resp.json().await?;
+        let parsed: VoyageResponse = response_json_limited(resp).await?;
         let first =
             parsed.data.into_iter().next().ok_or_else(|| {
                 LlmError::UnexpectedShape("voyage response had no data[0]".into())

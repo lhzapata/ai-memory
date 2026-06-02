@@ -19,7 +19,7 @@ use crate::auth_file::{load_entry, now_ms, save_entry};
 use crate::error::{LlmError, LlmResult};
 use crate::openai::{STRUCTURED_OUTPUT_SCHEMA_NAME, enforce_strict_object_schemas};
 use crate::provider::LlmProvider;
-use crate::text::truncate_with_ellipsis;
+use crate::response::{provider_error_body, response_json_limited};
 use crate::types::{ChatRequest, ChatResponse, Role, Usage};
 
 /// GitHub Copilot's public OAuth client id used by Copilot clients.
@@ -285,15 +285,13 @@ impl CopilotProvider {
             .map_err(LlmError::from)?;
         let status = resp.status();
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
+            let body = provider_error_body(resp).await;
             return Err(LlmError::Provider {
                 status: status.as_u16(),
-                body: truncate_with_ellipsis(&body, 1024),
+                body,
             });
         }
-        resp.json::<CopilotChatResponse>()
-            .await
-            .map_err(LlmError::from)
+        response_json_limited::<CopilotChatResponse>(resp).await
     }
 }
 
@@ -369,15 +367,12 @@ async fn exchange_copilot_token(
         .map_err(LlmError::from)?;
     let status = resp.status();
     if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
+        let body = provider_error_body(resp).await;
         return Err(LlmError::Auth(format!(
             "copilot token exchange failed ({status}): {body}"
         )));
     }
-    let exchanged = resp
-        .json::<CopilotExchangeResponse>()
-        .await
-        .map_err(LlmError::from)?;
+    let exchanged = response_json_limited::<CopilotExchangeResponse>(resp).await?;
     let expires_at_ms = unix_epoch_to_ms(exchanged.expires_at);
     Ok(CopilotApiToken {
         base_url: derive_copilot_api_base_url_from_token(&exchanged.token)

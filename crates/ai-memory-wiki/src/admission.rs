@@ -216,6 +216,16 @@ struct WebhookResponsePage {
 /// loop) and would be better served by an out-of-band fan-out service.
 pub const MAX_ADMISSION_WEBHOOKS: usize = 16;
 
+/// Maximum timeout a single webhook request may consume. Operators can set a
+/// lower value per hook; larger values are clamped so misconfiguration cannot
+/// pin write-path or async admission work indefinitely.
+pub const MAX_WEBHOOK_TIMEOUT_MS: u64 = 30_000;
+
+/// Maximum non-blocking webhook requests in flight for one process. Beyond this
+/// cap observer hooks are dropped with a warning; the durable wiki write has
+/// already completed, so backpressure here should never stall the caller.
+pub const MAX_ASYNC_ADMISSION_IN_FLIGHT: usize = 256;
+
 /// Maximum bytes read from a single webhook response body. Webhooks
 /// only need to return the mutated `page` envelope; multi-megabyte
 /// responses are pathological (faulty webhook or hostile peer) and
@@ -229,6 +239,7 @@ pub const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 pub struct AdmissionChain {
     webhooks: Arc<Vec<WebhookConfig>>,
     client: reqwest::Client,
+    async_semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 impl AdmissionChain {
@@ -252,6 +263,7 @@ impl AdmissionChain {
         Ok(Self {
             webhooks: Arc::new(webhooks),
             client,
+            async_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_ASYNC_ADMISSION_IN_FLIGHT)),
         })
     }
 
@@ -305,7 +317,7 @@ impl AdmissionChain {
                 .client
                 .post(&hook.url)
                 .header("X-Memory-Op", ctx.op.as_header_value())
-                .timeout(Duration::from_millis(hook.timeout_ms))
+                .timeout(webhook_timeout(hook.timeout_ms))
                 .json(&payload)
                 .send()
                 .await;
@@ -415,7 +427,7 @@ impl AdmissionChain {
                 .client
                 .post(&hook.url)
                 .header("X-Memory-Op", ctx.op.as_header_value())
-                .timeout(Duration::from_millis(hook.timeout_ms))
+                .timeout(webhook_timeout(hook.timeout_ms))
                 .json(&payload)
                 .send()
                 .await;
@@ -471,6 +483,14 @@ impl AdmissionChain {
             if !hook.events.contains(&ctx.op) {
                 continue;
             }
+            let Ok(permit) = self.async_semaphore.clone().try_acquire_owned() else {
+                tracing::warn!(
+                    webhook = %hook.name,
+                    cap = MAX_ASYNC_ADMISSION_IN_FLIGHT,
+                    "admission async queue saturated; dropping observer webhook",
+                );
+                continue;
+            };
             let client = self.client.clone();
             let url = hook.url.clone();
             let name = hook.name.clone();
@@ -481,6 +501,7 @@ impl AdmissionChain {
             let frontmatter = frontmatter.clone();
             let body = body.to_string();
             tokio::spawn(async move {
+                let _permit = permit;
                 let payload = WebhookRequestBody {
                     page: WebhookPagePayload {
                         path: path.as_deref().unwrap_or(""),
@@ -492,7 +513,7 @@ impl AdmissionChain {
                 match client
                     .post(&url)
                     .header("X-Memory-Op", op.as_header_value())
-                    .timeout(Duration::from_millis(timeout))
+                    .timeout(webhook_timeout(timeout))
                     .json(&payload)
                     .send()
                     .await
@@ -510,6 +531,10 @@ impl AdmissionChain {
             });
         }
     }
+}
+
+fn webhook_timeout(timeout_ms: u64) -> Duration {
+    Duration::from_millis(timeout_ms.clamp(1, MAX_WEBHOOK_TIMEOUT_MS))
 }
 
 async fn read_response_limited(resp: reqwest::Response) -> Result<Option<Vec<u8>>, reqwest::Error> {
@@ -543,6 +568,16 @@ mod tests {
         assert!(matches!(pol, FailurePolicy::Ignore));
         let op = AdmissionOp::default();
         assert!(matches!(op, AdmissionOp::WritePage));
+    }
+
+    #[test]
+    fn webhook_timeout_is_clamped_to_smart_bounds() {
+        assert_eq!(webhook_timeout(0), Duration::from_millis(1));
+        assert_eq!(webhook_timeout(2_000), Duration::from_millis(2_000));
+        assert_eq!(
+            webhook_timeout(MAX_WEBHOOK_TIMEOUT_MS + 1),
+            Duration::from_millis(MAX_WEBHOOK_TIMEOUT_MS)
+        );
     }
 
     /// `partial_failure` serialises only when `true`, so existing webhook

@@ -10,7 +10,7 @@ use tracing::debug;
 
 use crate::error::{LlmError, LlmResult};
 use crate::provider::LlmProvider;
-use crate::text::truncate_with_ellipsis;
+use crate::response::{provider_error_body, response_json_limited};
 use crate::types::{ChatRequest, ChatResponse, Role, Usage};
 
 /// Default Anthropic API base.
@@ -264,13 +264,13 @@ impl AnthropicProvider {
         let resp = builder.json(body).send().await?;
         let status = resp.status();
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
+            let body = provider_error_body(resp).await;
             return Err(LlmError::Provider {
                 status: status.as_u16(),
-                body: truncate_with_ellipsis(&body, 1024),
+                body,
             });
         }
-        resp.json::<R>().await.map_err(LlmError::from)
+        response_json_limited::<R>(resp).await
     }
 
     /// The auth headers for this provider instance: `x-api-key` for a static

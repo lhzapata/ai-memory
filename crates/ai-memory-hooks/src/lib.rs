@@ -27,5 +27,8 @@ pub mod synth;
 // pointing at this crate's `sanitize` module keep working.
 pub use ai_memory_core::{SanitizeConfig, Sanitized, Sanitizer};
 pub use payload::{HookEnvelope, HookEvent};
-pub use router::{DEFAULT_HOOK_INGEST_MAX_IN_FLIGHT, HookState, ProjectCache, hook_router};
+pub use router::{
+    DEFAULT_HOOK_INGEST_MAX_IN_FLIGHT, DEFAULT_PROJECT_CACHE_MAX_ENTRIES, HookState, ProjectCache,
+    ProjectCacheStore, hook_router,
+};
 pub use synth::synthesize_session_page;
