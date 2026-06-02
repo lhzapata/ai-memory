@@ -288,6 +288,18 @@ pub async fn run(config: &Config, args: ServeArgs) -> Result<()> {
                     "AI_MEMORY_BASE_PATH is not a safe path prefix; serving at root instead",
                 );
             }
+            // Symmetric warning for `--web-slug` / `AI_MEMORY_WEB_SLUG`. The
+            // original commit only warned on `base_path` downgrade, so an
+            // operator who set `AI_MEMORY_WEB_SLUG=/web space` would have
+            // their slug silently collapsed to the empty mount with no
+            // signal — same hazard as base-path.
+            let web_slug_normal = normalize_prefix(&args.web_slug);
+            if web_slug_normal.is_empty() && !args.web_slug.trim_matches('/').trim().is_empty() {
+                tracing::warn!(
+                    raw = %args.web_slug,
+                    "AI_MEMORY_WEB_SLUG is not a safe path prefix; serving the web UI at the base-path root instead",
+                );
+            }
             let base_href = web_base_href(&args.base_path, &args.web_slug);
             let router = mount_web_router(
                 router,
@@ -735,22 +747,40 @@ fn llm_retry_hint(provider: &str, model: &str, base_url: Option<&str>) -> String
 
 /// Normalise an operator-supplied path prefix into either `""` (root) or
 /// `/<core>` — exactly one leading slash, no trailing slash, internal
-/// empty/`//` segments collapsed. Segments are restricted to a safe path
-/// charset; anything outside it falls back to root so a malformed env var
-/// can never inject markup or a protocol-relative `//` into served HTML.
+/// empty/`//` segments collapsed.
+///
+/// Each segment must be a non-trivial member of the RFC 3986 *unreserved*
+/// set (`ALPHA / DIGIT / "-" / "." / "_" / "~"`). Dot-segments `.` and
+/// `..` are rejected outright even though their characters are unreserved
+/// — at the segment level they re-encode "current directory" and "parent
+/// directory" and would let a malformed env var hand the operator a
+/// traversal vector through every URL the server emits.
+///
+/// Anything that falls outside the rule collapses to `""` (root) so a
+/// bad env var can never inject markup or a protocol-relative `//` into
+/// served HTML.
 pub(crate) fn normalize_prefix(raw: &str) -> String {
     let segs: Vec<&str> = raw.trim().split('/').filter(|s| !s.is_empty()).collect();
     if segs.is_empty() {
         return String::new();
     }
     let safe = segs.iter().all(|s| {
-        s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~'))
+        // Reject dot-segments (`.` / `..`) — they pass the per-char
+        // unreserved test but mean "current" / "parent" at the segment
+        // boundary and turn `/<base>` into `/<base>/..` traversal.
+        *s != "." && *s != ".." && s.chars().all(is_unreserved_url_char)
     });
     if !safe {
         return String::new();
     }
     format!("/{}", segs.join("/"))
+}
+
+/// RFC 3986 `unreserved = ALPHA / DIGIT / "-" / "." / "_" / "~"`. Kept
+/// here as a single source of truth for both the path-prefix charset
+/// check and any future per-segment validation.
+fn is_unreserved_url_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~')
 }
 
 /// Build the `<base href>` value (always trailing-slash-terminated, never
@@ -779,16 +809,38 @@ fn escape_attr(s: &str) -> String {
 
 /// Insert `snippet` immediately after the first `<head…>` tag (or prepend
 /// it when there is no head).
+///
+/// Matches outside HTML comments only: `<!-- … <head … --> <head>` skips
+/// the comment-internal occurrence and injects after the real `<head>`.
+/// Anything inside `<textarea>`, `<script>`, or other raw-text elements
+/// is NOT specially handled — built-in askama templates never put
+/// `<head` in those, and a custom `--web-ui-dir` SPA that does is a
+/// misconfiguration the operator can fix at the source. Avoiding a
+/// full HTML parser here keeps injection a single pass + alloc.
 fn inject_into_head(html: &str, snippet: &str) -> String {
-    if let Some(start) = html.find("<head")
-        && let Some(gt) = html[start..].find('>')
-    {
-        let pos = start + gt + 1;
-        let mut out = String::with_capacity(html.len() + snippet.len());
-        out.push_str(&html[..pos]);
-        out.push_str(snippet);
-        out.push_str(&html[pos..]);
-        return out;
+    let bytes = html.as_bytes();
+    let mut cursor = 0usize;
+    while cursor < bytes.len() {
+        // Skip past any HTML comment opening here so a `<head` literal
+        // sitting inside it cannot win the search.
+        if html[cursor..].starts_with("<!--") {
+            match html[cursor..].find("-->") {
+                Some(end) => cursor += end + 3,
+                None => break, // Unterminated comment — bail out of injection.
+            }
+            continue;
+        }
+        if html[cursor..].starts_with("<head")
+            && let Some(gt) = html[cursor..].find('>')
+        {
+            let pos = cursor + gt + 1;
+            let mut out = String::with_capacity(html.len() + snippet.len());
+            out.push_str(&html[..pos]);
+            out.push_str(snippet);
+            out.push_str(&html[pos..]);
+            return out;
+        }
+        cursor += 1;
     }
     format!("{snippet}{html}")
 }
@@ -832,6 +884,65 @@ mod web_base_tests {
         assert_eq!(normalize_prefix("/wi\"ki"), "");
         assert_eq!(normalize_prefix("/wiki space"), "");
         assert_eq!(normalize_prefix("/<script>"), "");
+    }
+
+    /// Dot-segments must NOT survive normalisation. Their characters
+    /// pass the unreserved per-char allowlist (`.` is unreserved), so
+    /// the segment-level rejection is what stops `/..` and `/.` from
+    /// turning the base prefix into a traversal vector. Regression
+    /// guard — without this, `AI_MEMORY_BASE_PATH=/..` would serve
+    /// `/..` and let an upstream redirect normalise it to `/`.
+    #[test]
+    fn normalize_prefix_rejects_dot_segments() {
+        assert_eq!(normalize_prefix("/.."), "", "/.. must collapse to root");
+        assert_eq!(normalize_prefix("/."), "", "/. must collapse to root");
+        assert_eq!(
+            normalize_prefix("/wiki/.."),
+            "",
+            "any embedded /.. fails the whole prefix"
+        );
+        assert_eq!(
+            normalize_prefix("/wiki/./sub"),
+            "",
+            "any embedded /. fails the whole prefix"
+        );
+        // Segments that merely START with a dot but aren't pure
+        // dot-segments are still valid (RFC 3986 unreserved chars).
+        assert_eq!(normalize_prefix("/.wellknown"), "/.wellknown");
+    }
+
+    /// Nested base paths (`/a/b/c`) are valid; the normaliser keeps the
+    /// hierarchy intact instead of collapsing to one level.
+    #[test]
+    fn normalize_prefix_keeps_nested_paths() {
+        assert_eq!(normalize_prefix("/a/b/c"), "/a/b/c");
+        assert_eq!(normalize_prefix("a/b/c"), "/a/b/c");
+        assert_eq!(normalize_prefix("//a//b//c//"), "/a/b/c");
+        assert_eq!(normalize_prefix("/a/b/c/d/e"), "/a/b/c/d/e");
+    }
+
+    /// `inject_into_head` must skip `<head` literals sitting inside an
+    /// HTML comment, otherwise a custom SPA whose `index.html` had a
+    /// `<!-- <head> placeholder -->` comment would have the snippet
+    /// injected at the wrong place.
+    #[test]
+    fn inject_base_href_skips_head_inside_html_comment() {
+        let html =
+            "<!-- <head fake --><html><head><meta charset=\"utf-8\"></head><body></body></html>";
+        let out = inject_base_href(html, "/w/");
+        // Snippet must follow the REAL <head>, not the commented one —
+        // the comment must remain unmodified.
+        assert!(out.contains("<!-- <head fake -->"));
+        assert!(out.contains("<head><base href=\"/w/\"><meta"));
+    }
+
+    /// `inject_into_head` falls back to the prepend path on an
+    /// unterminated comment instead of looping forever (defensive).
+    #[test]
+    fn inject_base_href_on_unterminated_comment_falls_back_to_prepend() {
+        let html = "<!-- never closes <head>";
+        let out = inject_base_href(html, "/w/");
+        assert!(out.starts_with("<base href=\"/w/\">"));
     }
 
     #[test]
@@ -966,11 +1077,19 @@ fn mount_web_router(
                 trimmed.to_string()
             }
         };
+        // The redirect closure used to take `()` — so a request to
+        // `/<base>/<slug>/?q=x` lost `?q=x` when the redirect target
+        // was constructed. Take the `Uri` and append the query so the
+        // canonical form preserves the operator's parameters
+        // (fragments are client-only and never reach the server).
         Ok(router
             .route(
                 &format!("{slug}/"),
-                axum::routing::get(move || {
-                    let to = canonical.clone();
+                axum::routing::get(move |uri: axum::http::Uri| {
+                    let to = match uri.query() {
+                        Some(q) if !q.is_empty() => format!("{canonical}?{q}"),
+                        _ => canonical.clone(),
+                    };
                     async move { axum::response::Redirect::permanent(&to) }
                 }),
             )
@@ -1364,6 +1483,85 @@ mod tests {
         // Location must include the external prefix — the surrounding base nest
         // does NOT rewrite Location headers, so a bare `/web` would drop `/wiki`.
         assert_eq!(resp.headers().get(header::LOCATION).unwrap(), "/wiki/web",);
+    }
+
+    /// Trailing-slash redirect must preserve the query string. The
+    /// original handler took `()` and silently dropped `?q=x`, so a
+    /// link in the SPA that appended a filter param round-tripped to
+    /// the canonical URL with the param missing. Fragments are
+    /// client-only and never reach the server, so we only assert query.
+    #[tokio::test]
+    async fn trailing_slash_redirect_preserves_query_string() {
+        let (_tmp, router) = based_web_router("/wiki", "/web");
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .uri("/wiki/web/?q=foo&limit=5")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::PERMANENT_REDIRECT);
+        assert_eq!(
+            resp.headers().get(header::LOCATION).unwrap(),
+            "/wiki/web?q=foo&limit=5",
+            "redirect must carry the original query, not drop it"
+        );
+    }
+
+    /// Nested base paths (`/a/b/c`) — exercised by the normaliser
+    /// unit test but not previously end-to-end. Routes must be
+    /// reachable under the full prefix and 404 at any shorter prefix.
+    #[tokio::test]
+    async fn nested_base_path_nests_web_and_api() {
+        let (_tmp, router) = based_web_router("/a/b/c", "/web");
+        // Full nested prefix reaches both surfaces.
+        for uri in ["/a/b/c/web", "/a/b/c/api/v1/projects"] {
+            let resp = router
+                .clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "{uri} must reach the surface"
+            );
+        }
+        // A SHORTER prefix (e.g. only /a/b) must NOT leak — the nest is
+        // exactly `/a/b/c` and any partial mount is unmapped.
+        for uri in ["/a/b/web", "/a/api/v1/projects"] {
+            let resp = router
+                .clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::NOT_FOUND,
+                "{uri} must 404 — leaks the prefix otherwise"
+            );
+        }
+    }
+
+    /// Custom-SPA index that already carries its own `<base href>` —
+    /// today we prepend another one; HTML5 says the browser honours
+    /// the FIRST `<base>` so the injection becomes a silent no-op.
+    /// Documented behaviour (see `inject_into_head` doc-comment) but
+    /// also exercised here so a future change to "replace existing"
+    /// gets noticed by a failing test rather than silently shipping.
+    #[test]
+    fn inject_base_href_with_existing_base_tag_does_not_replace() {
+        let html = "<html><head><base href=\"/old/\"><title>x</title></head></html>";
+        let out = inject_base_href(html, "/new/");
+        // Injected snippet appears first, the old <base> remains too.
+        let new_pos = out.find("<base href=\"/new/\">").expect("new injected");
+        let old_pos = out.find("<base href=\"/old/\">").expect("old preserved");
+        assert!(
+            new_pos < old_pos,
+            "injected base must appear before the pre-existing one (browser ignores duplicates after the first)"
+        );
     }
 
     #[tokio::test]
