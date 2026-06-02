@@ -306,11 +306,13 @@ pub async fn run(config: &Config, args: ServeArgs) -> Result<()> {
                 args.enable_web,
                 store.reader.clone(),
                 wiki.clone(),
-                args.web_ui_dir.as_deref(),
-                &cors_origins,
-                &args.web_slug,
-                &base_href,
-                &base_path,
+                WebMountSpec {
+                    web_ui_dir: args.web_ui_dir.as_deref(),
+                    cors_origins: &cors_origins,
+                    web_slug: &args.web_slug,
+                    base_href: &base_href,
+                    base_path: &base_path,
+                },
             )?;
             let router = apply_http_layers(router, auth_state, config.allowed_hosts.clone());
             // Host the entire surface under the configured base path. Empty
@@ -987,17 +989,29 @@ mod web_base_tests {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Path / URL config the web mount needs. Bundling these together
+/// keeps `mount_web_router` and its helpers under clippy's
+/// `too_many_arguments` threshold without `#[allow]` papering over
+/// the call shape.
+pub(crate) struct WebMountSpec<'a> {
+    pub web_ui_dir: Option<&'a Path>,
+    pub cors_origins: &'a [String],
+    pub web_slug: &'a str,
+    pub base_href: &'a str,
+    pub base_path: &'a str,
+}
+
+/// Orchestrator: assemble the `/api/v1` + web-UI surfaces on top of
+/// `router`. Skips everything when web is disabled. Each concern lives
+/// in a dedicated helper below so this function reads as a four-step
+/// recipe (CORS-scoped API, slug normalisation, SPA-vs-builtin choice,
+/// final mount).
 fn mount_web_router(
     router: axum::Router,
     enable_web: bool,
     reader: ReaderPool,
     wiki: Wiki,
-    web_ui_dir: Option<&Path>,
-    cors_origins: &[String],
-    web_slug: &str,
-    base_href: &str,
-    base_path: &str,
+    spec: WebMountSpec<'_>,
 ) -> Result<axum::Router> {
     if !enable_web {
         return Ok(router);
@@ -1005,96 +1019,132 @@ fn mount_web_router(
     // Register the web surfaces BEFORE applying the bearer middleware. In
     // axum 0.8, `.layer()` only attaches to routes registered before the
     // call; nesting after the layer would silently bypass auth for /web/*.
-
-    // Build the api router and optionally wrap it in a CorsLayer — the layer
-    // is scoped ONLY to /api/v1 so /mcp, /hook, /admin, and /web remain
-    // untouched (CORS_NOT_APPLIED_TO_OTHER_ROUTES invariant).
-    let api = ai_memory_web::api_router(reader.clone(), wiki.clone());
-    let api = if cors_origins.is_empty() {
-        api
-    } else {
-        // Origins were already validated before binding, so parsing here
-        // is expected to succeed; `.expect` surfaces a logic bug if it does not.
-        let parsed: Vec<axum::http::HeaderValue> = cors_origins
-            .iter()
-            .map(|o| o.parse().expect("pre-validated origin must parse"))
-            .collect();
-        let cors = CorsLayer::new()
-            .allow_origin(parsed)
-            .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
-            .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE])
-            .allow_credentials(true)
-            .max_age(Duration::from_secs(600));
-        info!(origins = ?cors_origins, "CORS layer attached to /api/v1");
-        api.layer(cors)
-    };
-    let router = router.nest("/api/v1", api);
+    let router = router.nest(
+        "/api/v1",
+        build_api_router(&reader, &wiki, spec.cors_origins),
+    );
 
     // Where the UI is mounted WITHIN the (already-applied) base path.
     // Empty slug => the UI is the root of the base path itself.
-    let slug = normalize_prefix(web_slug);
+    let slug = normalize_prefix(spec.web_slug);
     let mount = if slug.is_empty() { "/" } else { slug.as_str() };
 
     // Custom SPA via --web-ui-dir (SPA fallback to index.html), otherwise
     // the built-in server-side wiki browser. In both cases the served
     // index carries an injected `<base href>` so relative asset/router
     // URLs resolve under `{base_path}{web_slug}`.
-    if let Some(dir) = web_ui_dir {
-        let dir = dir.to_path_buf();
-        let raw = std::fs::read_to_string(dir.join("index.html"))
-            .with_context(|| format!("reading custom web UI index at {}", dir.display()))?;
-        let injected = inject_base_path_meta(&inject_base_href(&raw, base_href), base_path);
-        info!(mount, base_href, base_path, "custom web UI mounted");
-        let spa = custom_spa_router(dir, injected);
-        return Ok(if slug.is_empty() {
-            router.merge(spa)
-        } else {
-            router.nest(&slug, spa)
-        });
+    if let Some(dir) = spec.web_ui_dir {
+        return mount_custom_spa(router, dir, &slug, spec.base_href, spec.base_path, mount);
     }
+    Ok(mount_builtin_browser(
+        router,
+        reader,
+        wiki,
+        &slug,
+        spec.base_href,
+        mount,
+    ))
+}
 
-    // The built-in server-rendered browser emits RELATIVE asset/link URLs
-    // (`static/…`, `w/…`, `search`, `.`). Inject a `<base href>` into every
-    // HTML response so they resolve under `{base_path}{web_slug}/` — the same
-    // anchoring the custom SPA gets via its injected index. Default (`/web/`)
-    // is byte-equivalent to the previous absolute `/web/…` links.
+/// Build the `/api/v1` router and apply the per-origin CORS layer if
+/// the operator configured any. The layer is scoped to this router only
+/// (CORS_NOT_APPLIED_TO_OTHER_ROUTES invariant — `/mcp`, `/hook`,
+/// `/admin`, and `/web` must remain CORS-free).
+fn build_api_router(reader: &ReaderPool, wiki: &Wiki, cors_origins: &[String]) -> axum::Router {
+    let api = ai_memory_web::api_router(reader.clone(), wiki.clone());
+    if cors_origins.is_empty() {
+        return api;
+    }
+    // Origins were already validated before binding, so parsing here
+    // is expected to succeed; `.expect` surfaces a logic bug if it does not.
+    let parsed: Vec<axum::http::HeaderValue> = cors_origins
+        .iter()
+        .map(|o| o.parse().expect("pre-validated origin must parse"))
+        .collect();
+    let cors = CorsLayer::new()
+        .allow_origin(parsed)
+        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE])
+        .allow_credentials(true)
+        .max_age(Duration::from_secs(600));
+    info!(origins = ?cors_origins, "CORS layer attached to /api/v1");
+    api.layer(cors)
+}
+
+/// Mount the operator's custom SPA from `--web-ui-dir`. Reads
+/// `index.html`, injects `<base href>` plus the `ai-memory-base-path`
+/// meta, and serves the rest as static assets with an SPA fallback to
+/// the injected shell. Errors surface as `anyhow` with the dir path.
+fn mount_custom_spa(
+    router: axum::Router,
+    dir: &Path,
+    slug: &str,
+    base_href: &str,
+    base_path: &str,
+    mount: &str,
+) -> Result<axum::Router> {
+    let dir = dir.to_path_buf();
+    let raw = std::fs::read_to_string(dir.join("index.html"))
+        .with_context(|| format!("reading custom web UI index at {}", dir.display()))?;
+    let injected = inject_base_path_meta(&inject_base_href(&raw, base_href), base_path);
+    info!(mount, base_href, base_path, "custom web UI mounted");
+    let spa = custom_spa_router(dir, injected);
+    Ok(if slug.is_empty() {
+        router.merge(spa)
+    } else {
+        router.nest(slug, spa)
+    })
+}
+
+/// Mount the built-in server-rendered wiki browser at `slug` with
+/// `<base href>` injection middleware. When `slug` is non-empty also
+/// register the trailing-slash → canonical redirect, preserving any
+/// query string the caller passed.
+fn mount_builtin_browser(
+    router: axum::Router,
+    reader: ReaderPool,
+    wiki: Wiki,
+    slug: &str,
+    base_href: &str,
+    mount: &str,
+) -> axum::Router {
+    // The built-in browser emits RELATIVE asset/link URLs (`static/…`,
+    // `w/…`, `search`, `.`). Inject a `<base href>` into every HTML
+    // response so they resolve under `{base_path}{web_slug}/` — the
+    // same anchoring the custom SPA gets via its injected index.
     let web_router = ai_memory_web::router(reader, wiki).layer(
         axum::middleware::from_fn_with_state(Arc::new(base_href.to_string()), inject_web_base_href),
     );
     info!(mount, base_href, "read-only wiki browser mounted");
     if slug.is_empty() {
-        Ok(router.merge(web_router))
-    } else {
-        // Strip-trailing-slash redirect. The target must carry the full
-        // external prefix (`{base_path}{slug}`), because the surrounding
-        // `nest(&base_path, …)` does NOT rewrite Location headers. Derive it
-        // from base_href (which already folds in base_path + slug).
-        let canonical = {
-            let trimmed = base_href.trim_end_matches('/');
-            if trimmed.is_empty() {
-                "/".to_string()
-            } else {
-                trimmed.to_string()
-            }
-        };
-        // The redirect closure used to take `()` — so a request to
-        // `/<base>/<slug>/?q=x` lost `?q=x` when the redirect target
-        // was constructed. Take the `Uri` and append the query so the
-        // canonical form preserves the operator's parameters
-        // (fragments are client-only and never reach the server).
-        Ok(router
-            .route(
-                &format!("{slug}/"),
-                axum::routing::get(move |uri: axum::http::Uri| {
-                    let to = match uri.query() {
-                        Some(q) if !q.is_empty() => format!("{canonical}?{q}"),
-                        _ => canonical.clone(),
-                    };
-                    async move { axum::response::Redirect::permanent(&to) }
-                }),
-            )
-            .nest(&slug, web_router))
+        return router.merge(web_router);
     }
+    // Strip-trailing-slash redirect. The target must carry the full
+    // external prefix because the surrounding `nest(&base_path, …)`
+    // does NOT rewrite Location headers. Derive it from base_href
+    // (which already folds in base_path + slug). The closure takes
+    // `Uri` so `?q=x` survives — see
+    // `trailing_slash_redirect_preserves_query_string`.
+    let canonical = {
+        let trimmed = base_href.trim_end_matches('/');
+        if trimmed.is_empty() {
+            "/".to_string()
+        } else {
+            trimmed.to_string()
+        }
+    };
+    router
+        .route(
+            &format!("{slug}/"),
+            axum::routing::get(move |uri: axum::http::Uri| {
+                let to = match uri.query() {
+                    Some(q) if !q.is_empty() => format!("{canonical}?{q}"),
+                    _ => canonical.clone(),
+                };
+                async move { axum::response::Redirect::permanent(&to) }
+            }),
+        )
+        .nest(slug, web_router)
 }
 
 fn custom_spa_router(dir: std::path::PathBuf, injected_index: String) -> axum::Router {
@@ -1317,11 +1367,13 @@ mod tests {
             true,
             store.reader.clone(),
             wiki,
-            None,
-            &[],
-            "/web",
-            "/web/",
-            "",
+            WebMountSpec {
+                web_ui_dir: None,
+                cors_origins: &[],
+                web_slug: "/web",
+                base_href: "/web/",
+                base_path: "",
+            },
         )
         .unwrap();
         let router = apply_http_layers(
@@ -1360,11 +1412,13 @@ mod tests {
             true,
             store.reader.clone(),
             wiki,
-            None,
-            &[],
-            web_slug,
-            &base_href,
-            &base,
+            WebMountSpec {
+                web_ui_dir: None,
+                cors_origins: &[],
+                web_slug,
+                base_href: &base_href,
+                base_path: &base,
+            },
         )
         .unwrap();
         let router = if base.is_empty() {
@@ -1604,11 +1658,13 @@ mod tests {
             true,
             store.reader.clone(),
             wiki,
-            Some(ui.path()),
-            &[],
-            "/web",
-            &base_href,
-            &base,
+            WebMountSpec {
+                web_ui_dir: Some(ui.path()),
+                cors_origins: &[],
+                web_slug: "/web",
+                base_href: &base_href,
+                base_path: &base,
+            },
         )
         .unwrap();
         let router = axum::Router::new().nest(&base, router);
@@ -1676,11 +1732,13 @@ mod tests {
             true,
             store.reader.clone(),
             wiki,
-            Some(ui.path()),
-            &[],
-            "/",
-            &base_href,
-            &base,
+            WebMountSpec {
+                web_ui_dir: Some(ui.path()),
+                cors_origins: &[],
+                web_slug: "/",
+                base_href: &base_href,
+                base_path: &base,
+            },
         )
         .unwrap();
         let router = axum::Router::new().nest(&base, router);
@@ -1883,11 +1941,13 @@ mod tests {
             true,
             store.reader.clone(),
             wiki,
-            None,
-            &cors_origins,
-            "/web",
-            "/web/",
-            "",
+            WebMountSpec {
+                web_ui_dir: None,
+                cors_origins: &cors_origins,
+                web_slug: "/web",
+                base_href: "/web/",
+                base_path: "",
+            },
         )
         .unwrap();
         // No auth layer so we can reach /api/v1 directly.
@@ -1936,11 +1996,13 @@ mod tests {
             true,
             store.reader.clone(),
             wiki,
-            None,
-            &cors_origins,
-            "/web",
-            "/web/",
-            "",
+            WebMountSpec {
+                web_ui_dir: None,
+                cors_origins: &cors_origins,
+                web_slug: "/web",
+                base_href: "/web/",
+                base_path: "",
+            },
         )
         .unwrap();
         let resp = router
@@ -1978,11 +2040,13 @@ mod tests {
             true,
             store.reader.clone(),
             wiki,
-            None,
-            &cors_origins,
-            "/web",
-            "/web/",
-            "",
+            WebMountSpec {
+                web_ui_dir: None,
+                cors_origins: &cors_origins,
+                web_slug: "/web",
+                base_href: "/web/",
+                base_path: "",
+            },
         )
         .unwrap();
         // /web is a non-api route; sending an Origin header must not trigger CORS.
