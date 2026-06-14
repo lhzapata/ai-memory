@@ -13,9 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scripts and emits the native `ai-memory hook --event … --agent grok` command.
   ai-memory entries merge into a dedicated `ai-memory.json`, leaving any
   third-party `~/.grok/hooks/*.json` untouched. NOTE: Grok ignores hook stdout on
-  `SessionStart`, so capture works but handoff injection does not — recover a
-  prior session's handoff via the MCP `memory_handoff_accept` tool. Adds
-  `AgentKind::Grok` (`grok` wire tag).
+  `SessionStart`, so capture works but handoff injection does not. Grok's
+  `session-start` therefore skips the handoff fetch entirely — the fetch is
+  destructive (it marks the handoff accepted server-side) and Grok would discard
+  the result, silently losing the handoff; recover a prior session's handoff via
+  the MCP `memory_handoff_accept` tool instead. Adds `AgentKind::Grok` (`grok`
+  wire tag) and the `AgentKind::session_start_injects_handoff` gate.
 
 ## [1.0.3] - 2026-06-13
 ### Added

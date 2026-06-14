@@ -235,6 +235,23 @@ impl AgentKind {
             _ => Self::Other,
         }
     }
+
+    /// Whether this agent injects the native `session-start` hook's stdout
+    /// into the resuming session as context. Agents that consume it return
+    /// `true` (Claude Code reads `hookSpecificOutput.additionalContext`).
+    ///
+    /// Grok ignores hook stdout on `SessionStart` (per Grok's hooks docs:
+    /// "For events like SessionStart or PostToolUse, stdout is ignored"), so
+    /// the native hook must NOT fetch the handoff for it: the fetch is
+    /// **destructive** (the server marks the handoff accepted) and the result
+    /// would be discarded — silently losing the handoff. For such agents the
+    /// handoff stays available on demand via the MCP `memory_handoff_accept`
+    /// tool. Only the native-hook agents (claude-code, grok) reach this code;
+    /// the others inject via their own staged-script / plugin formats.
+    #[must_use]
+    pub fn session_start_injects_handoff(self) -> bool {
+        !matches!(self, Self::Grok)
+    }
 }
 
 #[cfg(test)]
@@ -274,6 +291,11 @@ mod tests {
         );
         // Unknown tags still degrade to Other.
         assert_eq!(AgentKind::from_wire("grok-2"), AgentKind::Other);
+        // Grok cannot inject the session-start handoff (ignores hook stdout);
+        // every other agent can.
+        assert!(!AgentKind::Grok.session_start_injects_handoff());
+        assert!(AgentKind::ClaudeCode.session_start_injects_handoff());
+        assert!(AgentKind::Codex.session_start_injects_handoff());
     }
 
     #[test]
