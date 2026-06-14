@@ -22,6 +22,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `V20` extending the `sessions.agent_kind` CHECK so Grok sessions persist on
   upgraded servers (the antigravity/`V11` precedent).
 
+### Fixed
+- `memory_handoff_begin` and `memory_handoff_accept` now accept an optional
+  `workspace` argument alongside `project`, resolving through the same
+  workspace+project path as `memory_write_page` (begin, create-if-missing) and
+  `memory_handoff_cancel` (accept, find-only). They previously took `project`
+  only, so a cross-workspace handoff was routed by the per-actor active-project
+  fallback and could be written to — or read from — the wrong project.
+  `memory_handoff_cancel` already carried `workspace`.
+
 ## [1.0.3] - 2026-06-13
 ### Added
 - Native macOS release tarballs (`ai-memory-macos-aarch64.tar.gz` for

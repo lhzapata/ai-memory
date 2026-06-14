@@ -31,7 +31,7 @@ Long-term memory for the current project.\n\
 \n\
 **Default to the current project — always.** Every tool here \
 auto-scopes to the project resolved from your session's working \
-directory. **Do NOT pass `project` or `cwd` arguments unless the user \
+directory. **Do NOT pass `project`, `workspace`, or `cwd` arguments unless the user \
 explicitly references a *different* project by name** (e.g. 'what did \
 we decide in the other-app project?'). Phrases like 'this project', \
 'here', 'we', 'our work', 'where did we leave off' all mean the \
@@ -70,13 +70,17 @@ the conversation calls for them:\n\
   before you see your first prompt; if a block starting with \
   '📥 ai-memory: pending handoff' is anywhere in your context, \
   THAT is the handoff — answer from it directly, don't re-call \
-  this tool (it'll return null because handoffs are single-use).\n\
+  this tool (it'll return null because handoffs are single-use). Pass \
+  `workspace` + `project` together only when the user names a handoff \
+  in a sibling workspace/project.\n\
 - `memory_handoff_begin` — ONLY when the user is wrapping up / ending \
   the current session and you want to ensure the next agent has context \
   (the SessionEnd hook also auto-captures this). DO NOT use this to \
   summarize work mid-session, check project status, or answer a request \
   for a briefing. Keep the summary terse (2-3 sentences); put detail \
-  in open_questions + next_steps bullets.\n\
+  in open_questions + next_steps bullets. Pass `workspace` + `project` \
+  together only when leaving a handoff for a named sibling \
+  workspace/project.\n\
 - `memory_handoff_cancel` — when you realize you mistakenly called \
   `memory_handoff_begin`, or the user explicitly asks to discard a \
   pending handoff. Requires the exact `handoff_id` from the begin call \
@@ -332,9 +336,19 @@ struct HandoffBeginArgs {
     #[serde(default)]
     cwd: Option<String>,
     /// Project to scope the handoff to. Omit to target the project you're
-    /// currently working in (resolved from recent hook activity). **Omit unless the user explicitly names a *different* project.**
+    /// currently working in (resolved from recent hook activity). When set to a
+    /// name that doesn't exist yet, the project is **created** — so the handoff
+    /// always lands where you asked, never silently in the current project.
+    /// **Omit unless the user explicitly names a *different* project.**
     #[serde(default)]
     project: Option<String>,
+    /// Workspace to scope the handoff to, together with `project`; created if it
+    /// doesn't exist. Omit for the current workspace. Provide both to leave a
+    /// handoff in a *different* workspace (e.g. a sibling project on a shared
+    /// server) — without it the workspace is resolved from hook activity, which
+    /// can route a cross-workspace handoff to the wrong project.
+    #[serde(default)]
+    workspace: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
@@ -349,6 +363,12 @@ struct HandoffAcceptArgs {
     /// currently working in (resolved from recent hook activity). **Omit unless the user explicitly names a *different* project.**
     #[serde(default)]
     project: Option<String>,
+    /// Workspace to accept from, together with `project`. Omit for the
+    /// current/default workspace resolution chain. Provide both to read a
+    /// handoff left in a *different* workspace (e.g. a sibling project on a
+    /// shared server).
+    #[serde(default)]
+    workspace: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
@@ -1437,9 +1457,18 @@ impl AiMemoryServer {
         // path-pattern regexes already cover when applicable, but we
         // pass each entry through anyway as defence-in-depth.
         let s = &self.sanitizer;
+        // Mirror memory_write_page: a handoff is a write, so resolve through the
+        // create-if-missing write path and honour an explicit workspace. Using
+        // the project-only `effective_ids_with_actor` here dropped the
+        // workspace arg, so a cross-workspace handoff landed in whatever project
+        // the contaminable active-project slot pointed at (the scope-bleed bug).
         let (ws, proj) = self
-            .effective_ids_with_actor(args.project.as_deref(), &aps_actor)
-            .await;
+            .write_target_ids_with_actor(
+                args.workspace.as_deref(),
+                args.project.as_deref(),
+                &aps_actor,
+            )
+            .await?;
         let handoff = NewHandoff {
             workspace_id: ws,
             project_id: proj,
@@ -1486,8 +1515,12 @@ impl AiMemoryServer {
     ) -> Result<CallToolResult, McpError> {
         let aps_actor = Self::actor_key_from_parts(Some(&parts));
         let (ws, proj) = self
-            .effective_ids_with_actor(args.project.as_deref(), &aps_actor)
-            .await;
+            .effective_ids_for_read_args_with_actor(
+                args.workspace.as_deref(),
+                args.project.as_deref(),
+                &aps_actor,
+            )
+            .await?;
         let handoff = self
             .reader
             .latest_open_handoff(ws, proj, args.cwd)
@@ -2125,6 +2158,27 @@ mod tests {
             assert!(
                 prompt.contains("do NOT use") || prompt.contains("do **not** use"),
                 "prompt must explicitly disallow handoffs for permanent notes"
+            );
+        }
+    }
+
+    #[test]
+    fn prompts_teach_cross_workspace_handoff_scope() {
+        for prompt in [MEMORY_INSTRUCTIONS, ai_memory_core::SNIPPET_BODY] {
+            assert!(
+                prompt.contains("memory_handoff_begin") && prompt.contains("memory_handoff_accept"),
+                "prompt must include handoff lifecycle tools"
+            );
+            assert!(
+                prompt.contains("workspace") && prompt.contains("project"),
+                "handoff prompt guidance must mention workspace+project scoping"
+            );
+            assert!(
+                prompt.contains("sibling")
+                    && (prompt.contains("workspace/project")
+                        || prompt.contains("workspace + project")
+                        || prompt.contains("workspace` + `project")),
+                "handoff prompt guidance must restrict explicit workspace scope to named siblings"
             );
         }
     }
@@ -3428,6 +3482,7 @@ mod tests {
                     files_touched: vec![],
                     cwd: Some(r"C:\GIT\ai-memory".into()),
                     project: None,
+                    workspace: None,
                 }),
                 rmcp::handler::server::tool::Extension(test_parts_default()),
             )
@@ -3469,6 +3524,7 @@ mod tests {
                     files_touched: vec!["crates/ai-memory-store/src/writer.rs".into()],
                     cwd: Some("/tmp/aim".into()),
                     project: None,
+                    workspace: None,
                 }),
                 rmcp::handler::server::tool::Extension(test_parts_default()),
             )
@@ -3488,6 +3544,7 @@ mod tests {
                 Parameters(HandoffAcceptArgs {
                     cwd: Some("/tmp/aim".into()),
                     project: None,
+                    workspace: None,
                 }),
                 rmcp::handler::server::tool::Extension(test_parts_default()),
             )
@@ -3508,6 +3565,7 @@ mod tests {
                 Parameters(HandoffAcceptArgs {
                     cwd: Some("/tmp/aim".into()),
                     project: None,
+                    workspace: None,
                 }),
                 rmcp::handler::server::tool::Extension(test_parts_default()),
             )
@@ -3523,6 +3581,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handoff_begin_accept_honour_explicit_workspace() {
+        // Regression for the scope-bleed facet: memory_handoff_begin/accept used
+        // to ignore `workspace` (project-only resolution), so a cross-workspace
+        // handoff landed in whatever project the contaminable active-project
+        // slot pointed at instead of the named (workspace, project). Begin into
+        // an explicit sibling workspace, then prove it's there — and NOT in the
+        // current (default) project.
+        let (_tmp, _store, server, _ws, _pj) = setup_server().await;
+        server
+            .memory_handoff_begin(
+                Parameters(HandoffBeginArgs {
+                    summary: "cross-workspace handoff".into(),
+                    open_questions: vec![],
+                    next_steps: vec![],
+                    files_touched: vec![],
+                    cwd: None,
+                    project: Some("sibling-app".into()),
+                    workspace: Some("djalmajr".into()),
+                }),
+                rmcp::handler::server::tool::Extension(test_parts_default()),
+            )
+            .await
+            .unwrap();
+
+        // The current (default) project must NOT see it.
+        let in_default = server
+            .memory_handoff_accept(
+                Parameters(HandoffAcceptArgs {
+                    cwd: None,
+                    project: None,
+                    workspace: None,
+                }),
+                rmcp::handler::server::tool::Extension(test_parts_default()),
+            )
+            .await
+            .unwrap();
+        let in_default_text = in_default
+            .content
+            .first()
+            .and_then(|c| c.as_text())
+            .map(|t| t.text.clone())
+            .unwrap();
+        assert!(
+            in_default_text.contains("\"handoff\": null"),
+            "cross-workspace handoff must not bleed into the current project"
+        );
+
+        // The explicit (workspace, project) does see it.
+        let in_sibling = server
+            .memory_handoff_accept(
+                Parameters(HandoffAcceptArgs {
+                    cwd: None,
+                    project: Some("sibling-app".into()),
+                    workspace: Some("djalmajr".into()),
+                }),
+                rmcp::handler::server::tool::Extension(test_parts_default()),
+            )
+            .await
+            .unwrap();
+        let in_sibling_text = in_sibling
+            .content
+            .first()
+            .and_then(|c| c.as_text())
+            .map(|t| t.text.clone())
+            .unwrap();
+        assert!(
+            in_sibling_text.contains("cross-workspace handoff"),
+            "handoff must be retrievable from its explicit (workspace, project)"
+        );
+    }
+
+    #[tokio::test]
     async fn handoff_cancel_expires_open_handoff_and_clears_briefing_count() {
         let (_tmp, store, server, _ws, _pj) = setup_server().await;
         let begin = server
@@ -3534,6 +3664,7 @@ mod tests {
                     files_touched: vec![],
                     cwd: Some("/tmp/aim".into()),
                     project: None,
+                    workspace: None,
                 }),
                 rmcp::handler::server::tool::Extension(test_parts_default()),
             )
@@ -3611,6 +3742,7 @@ mod tests {
                 Parameters(HandoffAcceptArgs {
                     cwd: Some("/tmp/aim".into()),
                     project: None,
+                    workspace: None,
                 }),
                 rmcp::handler::server::tool::Extension(test_parts_default()),
             )
@@ -3791,6 +3923,7 @@ mod tests {
                 Parameters(HandoffAcceptArgs {
                     cwd: None,
                     project: None,
+                    workspace: None,
                 }),
                 rmcp::handler::server::tool::Extension(test_parts_default()),
             )
