@@ -19,6 +19,7 @@
 //!   (copy latest pages via the write path, then purge the source).
 //! - `POST /admin/write-page`     — write or update a wiki page atomically.
 //! - `GET  /admin/read-page`      — fetch the full body of a single wiki page by path.
+//! - `POST /admin/delete-page`    — delete a single wiki page by path.
 //!
 //! The CLI is responsible for filesystem access (collecting sources from
 //! the project repo, rendering output for humans); the server is
@@ -164,6 +165,8 @@ fn default_chunk_input_tokens() -> usize {
 /// - `POST /admin/rename-project`
 /// - `POST /admin/move-project`
 /// - `POST /admin/write-page`
+/// - `POST /admin/delete-page`
+/// - user-management routes under `/admin/users*`
 pub fn admin_router(state: AdminState) -> Router {
     let state = Arc::new(state);
     let operational = Router::new()
@@ -183,11 +186,7 @@ pub fn admin_router(state: AdminState) -> Router {
         .route("/admin/rename-project", post(handle_rename_project))
         .route("/admin/move-project", post(handle_move_project))
         .route("/admin/write-page", post(handle_write_page))
-        .route("/admin/delete-page", post(handle_delete_page))
-        .route_layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            require_root_for_multiuser_admin,
-        ));
+        .route("/admin/delete-page", post(handle_delete_page));
     let users = Router::new()
         .route(
             "/admin/users",
@@ -199,7 +198,13 @@ pub fn admin_router(state: AdminState) -> Router {
             "/admin/users/{username}/rotate-token",
             post(handle_rotate_user_token),
         );
-    operational.merge(users).with_state(state)
+    operational
+        .merge(users)
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            require_root_for_multiuser_admin,
+        ))
+        .with_state(state)
 }
 
 async fn require_root_for_multiuser_admin(
@@ -227,7 +232,7 @@ async fn require_root_for_multiuser_admin(
             StatusCode::FORBIDDEN,
             "admin operation is root-only in multi-user mode",
         ),
-        ai_memory_core::AuthLevel::Root => unreachable!("guarded above"),
+        ai_memory_core::AuthLevel::Root => return next.run(req).await,
     };
     (code, Json(serde_json::json!({ "error": msg }))).into_response()
 }
@@ -3068,7 +3073,7 @@ fn require_root(
             "user management requires authentication",
         ),
         ai_memory_core::AuthLevel::User => (StatusCode::FORBIDDEN, "user management is root-only"),
-        ai_memory_core::AuthLevel::Root => unreachable!("guarded above"),
+        ai_memory_core::AuthLevel::Root => return Ok(()),
     };
     Err((code, Json(serde_json::json!({ "error": msg }))))
 }
@@ -3649,10 +3654,8 @@ mod tests {
             .unwrap()
     }
 
-    #[tokio::test]
-    async fn multiuser_operational_admin_routes_reject_db_user_tier() {
-        let (_tmp, router) = user_admin_test_router("root-token");
-        let routes = [
+    fn admin_route_samples() -> Vec<(&'static str, &'static str, serde_json::Value)> {
+        vec![
             ("POST", "/admin/backup", serde_json::Value::Null),
             (
                 "POST",
@@ -3742,9 +3745,27 @@ mod tests {
                     "path": "notes/x.md"
                 }),
             ),
-        ];
+            ("GET", "/admin/users", serde_json::Value::Null),
+            (
+                "POST",
+                "/admin/users",
+                serde_json::json!({"username": "alice"}),
+            ),
+            ("POST", "/admin/users/alice/expire", serde_json::Value::Null),
+            ("POST", "/admin/users/alice/revive", serde_json::Value::Null),
+            (
+                "POST",
+                "/admin/users/alice/rotate-token",
+                serde_json::Value::Null,
+            ),
+        ]
+    }
 
-        for (method, uri, payload) in routes {
+    #[tokio::test]
+    async fn multiuser_admin_routes_reject_db_user_tier() {
+        let (_tmp, router) = user_admin_test_router("root-token");
+
+        for (method, uri, payload) in admin_route_samples() {
             let mut builder = Request::builder()
                 .method(method)
                 .uri(uri)
@@ -3763,24 +3784,33 @@ mod tests {
             assert_eq!(
                 resp.status(),
                 StatusCode::FORBIDDEN,
-                "{method} {uri} must be root-only in multi-user mode"
+                "{method} {uri} must be root-only for DB users in multi-user mode"
             );
         }
     }
 
     #[tokio::test]
-    async fn multiuser_operational_admin_routes_reject_anonymous() {
+    async fn multiuser_admin_routes_reject_anonymous() {
         let (_tmp, router) = user_admin_test_router("root-token");
-        let resp = router
-            .oneshot(
-                Request::builder()
-                    .uri("/admin/status")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        for (method, uri, payload) in admin_route_samples() {
+            let mut builder = Request::builder().method(method).uri(uri);
+            let body = if payload.is_null() {
+                Body::empty()
+            } else {
+                builder = builder.header("content-type", "application/json");
+                Body::from(serde_json::to_vec(&payload).unwrap())
+            };
+            let resp = router
+                .clone()
+                .oneshot(builder.body(body).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::UNAUTHORIZED,
+                "{method} {uri} must require authentication in multi-user mode"
+            );
+        }
     }
 
     #[tokio::test]

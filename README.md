@@ -345,9 +345,8 @@ created via `ai-memory user add` get their own tokens that resolve to
 their identity in audit logs (and, in subsequent milestones, page
 frontmatter + the web UI). Data stays single-tenant — there is no
 per-page RBAC — but once `[auth].token_pepper` enables multi-user
-mode, operational `/admin/*` endpoints such as backup, checkpoints,
-restore-page, purge, move, embed, and commit require the root token.
-Existing single-user installs
+mode, every `/admin/*` endpoint requires the root token, including
+status/search/read-page and user-management routes. Existing single-user installs
 are not affected unless you opt in by setting `[auth].token_pepper`
 (auto-generated for new installs by `ai-memory init`). See
 [`docs/users.md`](docs/users.md) for the full walkthrough and the

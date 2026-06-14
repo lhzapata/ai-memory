@@ -1956,7 +1956,10 @@ fn test_parts_default() -> axum::http::request::Parts {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ai_memory_core::{NewObservation, NewPage, NewSession, ObservationKind, PagePath, Tier};
+    use ai_memory_core::{
+        ActorContext, AuthLevel, NewObservation, NewPage, NewSession, NewUser, ObservationKind,
+        PagePath, Tier,
+    };
     use ai_memory_store::Store;
     use ai_memory_wiki::{Wiki, WritePageRequest};
     use tempfile::TempDir;
@@ -3207,6 +3210,77 @@ mod tests {
                 .contains("workspace and project must be provided together"),
             "error should explain the required scope pair: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn memory_write_page_as_db_user_records_author() {
+        let tmp = TempDir::new().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+        let ws = store
+            .writer
+            .get_or_create_workspace("default")
+            .await
+            .unwrap();
+        let proj = store
+            .writer
+            .get_or_create_project(ws, "scratch", None)
+            .await
+            .unwrap();
+        let token = ai_memory_store::generate_token().unwrap();
+        let pepper = ai_memory_store::TokenPepper::new("test-pepper-author");
+        let token_hash = ai_memory_store::hash_token(&token, &pepper);
+        let user_id = store
+            .writer
+            .create_user(
+                NewUser {
+                    username: "alice".into(),
+                    name: Some("Alice Smith".into()),
+                    email: Some("alice@example.com".into()),
+                },
+                token_hash,
+            )
+            .await
+            .unwrap();
+        let wiki = Wiki::new(tmp.path(), store.writer.clone()).unwrap();
+        let server = AiMemoryServer::new(store.reader.clone(), store.writer.clone(), ws, proj)
+            .with_wiki(wiki);
+        let mut parts = test_parts_default();
+        parts.extensions.insert(AuthLevel::User);
+        parts.extensions.insert(user_id);
+        parts.extensions.insert(ActorContext {
+            user: Some("alice".into()),
+            name: Some("Alice Smith".into()),
+            email: Some("alice@example.com".into()),
+            ..ActorContext::default()
+        });
+
+        server
+            .memory_write_page(
+                Parameters(WritePageArgs {
+                    path: "notes/user-attributed.md".into(),
+                    body: "# User Attributed\n\nWritten by a normal DB user.".into(),
+                    title: None,
+                    tier: Some("semantic".into()),
+                    tags: vec![],
+                    pinned: false,
+                    project: None,
+                    workspace: None,
+                }),
+                rmcp::handler::server::tool::Extension(parts),
+            )
+            .await
+            .unwrap();
+
+        let meta = store
+            .reader
+            .page_meta("default", "scratch", "notes/user-attributed.md")
+            .await
+            .unwrap()
+            .expect("written page should have metadata");
+        let author = meta.author.expect("DB user write should carry author");
+        assert_eq!(author.username, "alice");
+        assert_eq!(author.name.as_deref(), Some("Alice Smith"));
+        assert_eq!(author.email.as_deref(), Some("alice@example.com"));
     }
 
     #[tokio::test]

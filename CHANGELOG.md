@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Multi-user admin authorization is now enforced at the shared `/admin/*`
+  router boundary, including user-management routes, so DB-user tokens can use
+  normal MCP/API read-write surfaces for attribution but cannot reach any admin
+  endpoint. Added regression coverage for every admin route plus DB-user write
+  attribution.
+
 ## [1.0.4] - 2026-06-14
 ### Added
 - `install-hooks --agent grok` (plus `setup-agent` / `uninstall` coverage) for

@@ -93,10 +93,10 @@ pub struct ActorContext {
 /// having to inspect or compare username strings against config.
 ///
 /// Available as `Extension<AuthLevel>` on every request after the
-/// auth middleware runs. Admin user-management endpoints
-/// (`POST /admin/users`, expire / revive / rotate-token) check this
-/// against [`AuthLevel::Root`] and return 403 for `User` /
-/// 401 for `Anonymous`.
+/// auth middleware runs. In multi-user mode every `/admin/*` route
+/// checks this against [`AuthLevel::Root`] and returns 403 for
+/// `User` / 401 for `Anonymous`; normal DB users are allowed on the
+/// MCP and read-only API surfaces where writes are attributed to them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthLevel {
     /// Rung 0: no auth configured. Read-mostly setups; root-only
@@ -107,12 +107,12 @@ pub enum AuthLevel {
     Root,
     /// Rung 2: authenticated via the `users` table.
     /// Allowed on regular routes (write_page, query, etc.) but
-    /// refused on the root-only admin user-management routes.
+    /// refused on root-only admin routes.
     User,
 }
 
 impl AuthLevel {
-    /// `true` if this tier is allowed to perform user-management
+    /// `true` if this tier is allowed to perform root-only admin
     /// operations (currently just `Root`). Centralises the
     /// authorization check so handlers don't drift on what counts
     /// as "root-only".

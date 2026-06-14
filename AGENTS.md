@@ -102,6 +102,10 @@ without disturbing the rest of the file.
   search, embed, retention, and destructive paths must use no-create lookups
   and fail closed on partial or missing scope; only explicit write/create
   paths may create workspaces or projects.
+- Preserve auth boundaries at shared router/helper boundaries. In multi-user
+  mode, every `/admin/*` route is root-only; DB-user tokens are for normal
+  MCP/API read/write attribution and must not bypass admin gates or admission
+  webhooks.
 - Prefer explicit fallbacks over `unwrap`, `expect`, or `unreachable!` in
   runtime paths. Panics are acceptable in tests only.
 - Do not use `unsafe` for performance work in this project unless profiling
