@@ -1665,6 +1665,7 @@ pub struct PurgeProjectReport {
 
 async fn handle_purge_project(
     State(state): State<Arc<AdminState>>,
+    actor_ext: Option<axum::Extension<ai_memory_core::ActorContext>>,
     Json(req): Json<PurgeProjectRequest>,
 ) -> impl IntoResponse {
     if !req.confirm {
@@ -1688,11 +1689,17 @@ async fn handle_purge_project(
     // Admission must run before any destructive work. A reject-policy webhook
     // is allowed to abort the purge while DB rows and files are still intact.
     // Seed names from the request so mirrors do not depend on DB lookup after
-    // the rows are purged below.
+    // the rows are purged below. Carry the authenticated actor so a scope-guard
+    // admission webhook can authorize the purge by user — an empty actor is
+    // rejected (`403 user '' not allowed to purge_project`).
+    let actor = actor_ext
+        .map(|axum::Extension(a)| a)
+        .unwrap_or_else(ai_memory_core::ActorContext::anonymous);
     let purge_ctx = AdmissionContext {
         workspace: req.workspace.clone(),
         project: req.project.clone(),
         op: AdmissionOp::PurgeProject,
+        actor,
         ..Default::default()
     };
     let resolved_purge_ctx = match state
@@ -2004,6 +2011,7 @@ async fn true_move_project(
     src_ws: WorkspaceId,
     src_proj: ProjectId,
     pre_checkpoint: Option<String>,
+    actor: ai_memory_core::ActorContext,
 ) -> (StatusCode, Json<serde_json::Value>) {
     // Ensure the destination workspace ROW exists (FK target for the
     // re-stamp) without creating a new project — the existing project_id is
@@ -2039,6 +2047,7 @@ async fn true_move_project(
         destination_workspace: Some(req.to_workspace.clone()),
         destination_project: Some(req.project.clone()),
         op: AdmissionOp::MoveProject,
+        actor,
         ..Default::default()
     };
 
@@ -2197,6 +2206,7 @@ fn page_copy_differs(
 
 async fn handle_move_project(
     State(state): State<Arc<AdminState>>,
+    actor_ext: Option<axum::Extension<ai_memory_core::ActorContext>>,
     Json(req): Json<MoveProjectRequest>,
 ) -> impl IntoResponse {
     // Destructive: it purges the source after copying. Require confirm.
@@ -2276,8 +2286,14 @@ async fn handle_move_project(
     // admission webhook. The copy+purge path below is reserved for the MERGE
     // case, where two project_ids can't be re-stamped into one
     // (UNIQUE(workspace_id, name) collision).
+    // Carry the authenticated actor into both legs (move admission + the
+    // source-purge admission) so a scope-guard webhook authorizes by user.
+    let actor = actor_ext
+        .map(|axum::Extension(a)| a)
+        .unwrap_or_else(ai_memory_core::ActorContext::anonymous);
+
     if !merged_into_existing {
-        return true_move_project(&state, &req, src_ws, src_proj, pre_checkpoint).await;
+        return true_move_project(&state, &req, src_ws, src_proj, pre_checkpoint, actor).await;
     }
 
     // MERGE: the destination already holds a same-named project. Get-or-create
@@ -2296,6 +2312,7 @@ async fn handle_move_project(
         dst_ws,
         dst_proj,
         pre_checkpoint,
+        actor,
     )
     .await
 }
@@ -2395,6 +2412,11 @@ async fn prepare_source_pages(
 /// reads as "validate → branch → copy_purge_merge", and the copy
 /// loop's per-page IO runs through a pre-computed `PreparedSourcePage`
 /// instead of fetching the same metadata twice.
+// Merge-path orchestration: state + req + the four namespaced ids
+// (src/dst ws+proj) + pre-checkpoint + the authenticated actor. Bundling
+// the ids into a struct would obscure more than the arity warning, matching
+// the existing `#[allow]`s on the equivalent store-layer helpers.
+#[allow(clippy::too_many_arguments)]
 async fn copy_purge_merge(
     state: &AdminState,
     req: &MoveProjectRequest,
@@ -2403,6 +2425,7 @@ async fn copy_purge_merge(
     dst_ws: WorkspaceId,
     dst_proj: ProjectId,
     pre_checkpoint: Option<String>,
+    actor: ai_memory_core::ActorContext,
 ) -> (StatusCode, Json<serde_json::Value>) {
     // Enumerate the source's latest pages (authoritative on is_latest).
     let summaries = match state
@@ -2570,7 +2593,7 @@ async fn copy_purge_merge(
                 // git-mirror lands the copy under the destination path.
                 admission_ctx: None,
                 author_id: None,
-                actor: ai_memory_core::ActorContext::anonymous(),
+                actor: actor.clone(),
             })
             .await
         {
@@ -2647,6 +2670,7 @@ async fn copy_purge_merge(
         workspace: req.from_workspace.clone(),
         project: req.project.clone(),
         op: AdmissionOp::PurgeProject,
+        actor,
         ..Default::default()
     };
     let resolved_purge_ctx = match state
@@ -3358,6 +3382,17 @@ mod tests {
     }
 
     async fn post_write_page(router: &Router, ws: &str, project: &str, path: &str, body: &str) {
+        post_write_page_with_actor(router, ws, project, path, body, None).await;
+    }
+
+    async fn post_write_page_with_actor(
+        router: &Router,
+        ws: &str,
+        project: &str,
+        path: &str,
+        body: &str,
+        actor: Option<&'static str>,
+    ) {
         let req_body = serde_json::json!({
             "workspace": ws,
             "project": project,
@@ -3365,13 +3400,20 @@ mod tests {
             "body": body,
             "title": "Read-back fixture",
         });
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri("/admin/write-page")
+            .header("content-type", "application/json");
+        if let Some(user) = actor {
+            builder = builder.extension(ai_memory_core::ActorContext {
+                user: Some(user.into()),
+                ..ai_memory_core::ActorContext::default()
+            });
+        }
         let resp = router
             .clone()
             .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/admin/write-page")
-                    .header("content-type", "application/json")
+                builder
                     .body(Body::from(serde_json::to_vec(&req_body).unwrap()))
                     .unwrap(),
             )
@@ -3566,6 +3608,335 @@ mod tests {
             Some("doomed"),
             "purge admission must carry the real project name, not an empty/_unscoped placeholder"
         );
+    }
+
+    /// Scope-guard / attribution regression: a destructive admin op must carry
+    /// the authenticated actor into the admission context, so a scope-guard
+    /// webhook can authorize by user. In prod a purge ran with an empty actor
+    /// (`AdmissionContext { ..Default::default() }`) and scope-guard rejected it
+    /// with `403 user '' not allowed to purge_project`.
+    #[tokio::test]
+    async fn purge_project_admission_carries_the_actor() {
+        use ai_memory_core::ActorContext;
+        use ai_memory_wiki::{AdmissionChain, FailurePolicy, WebhookConfig};
+        use axum::http::HeaderMap;
+        use axum::routing::post;
+        use std::sync::Mutex;
+
+        let captured: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let cap = captured.clone();
+        let app = Router::new().route(
+            "/sync",
+            post(
+                move |headers: HeaderMap, Json(payload): Json<serde_json::Value>| {
+                    let cap = cap.clone();
+                    async move {
+                        if headers.get("X-Memory-Op").and_then(|v| v.to_str().ok())
+                            == Some("purge_project")
+                        {
+                            *cap.lock().unwrap() = Some(
+                                payload["ctx"]["actor"]["user"]
+                                    .as_str()
+                                    .unwrap_or_default()
+                                    .to_string(),
+                            );
+                        }
+                        StatusCode::NO_CONTENT
+                    }
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let tmp = TempDir::new().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+        let chain = AdmissionChain::new(vec![WebhookConfig {
+            name: "mirror".into(),
+            url: format!("{base}/sync"),
+            timeout_ms: 2_000,
+            failure_policy: FailurePolicy::Ignore,
+            events: vec![AdmissionOp::WritePage, AdmissionOp::PurgeProject],
+            blocking: true,
+        }])
+        .unwrap();
+        let wiki = Wiki::new(tmp.path(), store.writer.clone())
+            .unwrap()
+            .with_admission_chain(chain)
+            .with_store_reader(store.reader.clone());
+        let router = admin_router(AdminState {
+            writer: store.writer.clone(),
+            reader: store.reader.clone(),
+            wiki,
+            llm: None,
+            embedder: None,
+            provider_health: ProviderHealth::default(),
+            decay_params: DecayParams::default(),
+            data_dir: tmp.path().to_path_buf(),
+            db_path: store.db_path().to_path_buf(),
+            bind: "127.0.0.1:49374".to_string(),
+            bootstrap_lock: Arc::new(tokio::sync::Mutex::new(())),
+            token_pepper: None,
+            active_project: ai_memory_core::ActiveProject::new(),
+            on_project_moved: None,
+        });
+
+        post_write_page(&router, "default", "doomed", "notes/x.md", "bye").await;
+
+        let resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/purge-project")
+                    .header("content-type", "application/json")
+                    .extension(ActorContext {
+                        user: Some("alice".into()),
+                        ..ActorContext::default()
+                    })
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "workspace": "default",
+                            "project": "doomed",
+                            "confirm": true,
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "purge should succeed");
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(
+            captured.lock().unwrap().as_deref(),
+            Some("alice"),
+            "purge admission must carry the authenticated actor (empty actor → scope-guard 403 in prod)"
+        );
+    }
+
+    /// End-to-end reproduction of the prod scope-guard scenario: a
+    /// `Reject`-policy admission webhook that authorizes `purge_project` by
+    /// `ctx.actor.user` (the real scope-guard shape). Before the fix the handler
+    /// sent an empty actor, so the guard returned 403 and the purge 500'd; with
+    /// the actor propagated, a matching user is allowed and the purge succeeds.
+    /// Both branches run in one test so the second (allowed) purge returning
+    /// `200` — not `404` — also proves the first (denied) purge left the project
+    /// intact.
+    #[tokio::test]
+    async fn scope_guard_blocks_purge_without_actor_allows_with_actor() {
+        use ai_memory_core::ActorContext;
+        use ai_memory_wiki::{AdmissionChain, FailurePolicy, WebhookConfig};
+        use axum::routing::post;
+
+        // scope-guard emulation: allow `purge_project` only when the admission
+        // payload's actor is "alice"; deny (403) otherwise.
+        let app = Router::new().route(
+            "/guard",
+            post(|Json(payload): Json<serde_json::Value>| async move {
+                if payload["ctx"]["actor"]["user"].as_str() == Some("alice") {
+                    StatusCode::NO_CONTENT
+                } else {
+                    StatusCode::FORBIDDEN
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let tmp = TempDir::new().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+        let chain = AdmissionChain::new(vec![WebhookConfig {
+            name: "scope-guard".into(),
+            url: format!("{base}/guard"),
+            timeout_ms: 2_000,
+            failure_policy: FailurePolicy::Reject,
+            events: vec![AdmissionOp::PurgeProject],
+            blocking: true,
+        }])
+        .unwrap();
+        let wiki = Wiki::new(tmp.path(), store.writer.clone())
+            .unwrap()
+            .with_admission_chain(chain)
+            .with_store_reader(store.reader.clone());
+        let router = admin_router(AdminState {
+            writer: store.writer.clone(),
+            reader: store.reader.clone(),
+            wiki,
+            llm: None,
+            embedder: None,
+            provider_health: ProviderHealth::default(),
+            decay_params: DecayParams::default(),
+            data_dir: tmp.path().to_path_buf(),
+            db_path: store.db_path().to_path_buf(),
+            bind: "127.0.0.1:49374".to_string(),
+            bootstrap_lock: Arc::new(tokio::sync::Mutex::new(())),
+            token_pepper: None,
+            active_project: ai_memory_core::ActiveProject::new(),
+            on_project_moved: None,
+        });
+
+        post_write_page(&router, "default", "doomed", "notes/x.md", "bye").await;
+
+        let purge_req = |actor: Option<&'static str>| {
+            let mut builder = Request::builder()
+                .method("POST")
+                .uri("/admin/purge-project")
+                .header("content-type", "application/json");
+            if let Some(user) = actor {
+                builder = builder.extension(ActorContext {
+                    user: Some(user.into()),
+                    ..ActorContext::default()
+                });
+            }
+            builder
+                .body(Body::from(
+                    serde_json::to_vec(&serde_json::json!({
+                        "workspace": "default",
+                        "project": "doomed",
+                        "confirm": true,
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap()
+        };
+
+        // Case A — empty actor → scope-guard 403 → handler 500, project intact.
+        let denied = router.clone().oneshot(purge_req(None)).await.unwrap();
+        assert_eq!(
+            denied.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "empty actor must be rejected by scope-guard (the prod bug)"
+        );
+
+        // Case B — actor=alice → scope-guard 204 → purge succeeds (200). A 200
+        // here (not 404) also proves Case A left the project intact.
+        let allowed = router
+            .clone()
+            .oneshot(purge_req(Some("alice")))
+            .await
+            .unwrap();
+        assert_eq!(
+            allowed.status(),
+            StatusCode::OK,
+            "matching actor must be authorized and the purge succeed"
+        );
+    }
+
+    /// Merge moves copy source pages through `Wiki::write_page` before purging
+    /// the source. That copy path must carry the authenticated actor too;
+    /// otherwise a scope-guard webhook that gates `write_page` by user still
+    /// rejects `/admin/move-project` even though purge/move admission was fixed.
+    #[tokio::test]
+    async fn move_project_merge_copy_admission_carries_the_actor() {
+        use ai_memory_core::ActorContext;
+        use ai_memory_wiki::{AdmissionChain, FailurePolicy, WebhookConfig};
+        use axum::routing::post;
+
+        let app = Router::new().route(
+            "/guard",
+            post(|Json(payload): Json<serde_json::Value>| async move {
+                if payload["ctx"]["actor"]["user"].as_str() == Some("alice") {
+                    StatusCode::NO_CONTENT
+                } else {
+                    StatusCode::FORBIDDEN
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let tmp = TempDir::new().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+        let chain = AdmissionChain::new(vec![WebhookConfig {
+            name: "scope-guard".into(),
+            url: format!("{base}/guard"),
+            timeout_ms: 2_000,
+            failure_policy: FailurePolicy::Reject,
+            events: vec![AdmissionOp::WritePage, AdmissionOp::PurgeProject],
+            blocking: true,
+        }])
+        .unwrap();
+        let wiki = Wiki::new(tmp.path(), store.writer.clone())
+            .unwrap()
+            .with_admission_chain(chain)
+            .with_store_reader(store.reader.clone());
+        let router = admin_router(AdminState {
+            writer: store.writer.clone(),
+            reader: store.reader.clone(),
+            wiki,
+            llm: None,
+            embedder: None,
+            provider_health: ProviderHealth::default(),
+            decay_params: DecayParams::default(),
+            data_dir: tmp.path().to_path_buf(),
+            db_path: store.db_path().to_path_buf(),
+            bind: "127.0.0.1:49374".to_string(),
+            bootstrap_lock: Arc::new(tokio::sync::Mutex::new(())),
+            token_pepper: None,
+            active_project: ai_memory_core::ActiveProject::new(),
+            on_project_moved: None,
+        });
+
+        post_write_page_with_actor(
+            &router,
+            "src",
+            "merged",
+            "notes/source.md",
+            "source body",
+            Some("alice"),
+        )
+        .await;
+        // Same project name in the destination workspace forces the copy-purge
+        // merge path instead of the true-move path.
+        post_write_page_with_actor(
+            &router,
+            "dst",
+            "merged",
+            "notes/existing.md",
+            "existing body",
+            Some("alice"),
+        )
+        .await;
+
+        let resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/move-project")
+                    .header("content-type", "application/json")
+                    .extension(ActorContext {
+                        user: Some("alice".into()),
+                        ..ActorContext::default()
+                    })
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "from_workspace": "src",
+                            "project": "merged",
+                            "to_workspace": "dst",
+                            "confirm": true,
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK, "merge move should succeed");
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["merged_into_existing"], true);
+        assert_eq!(json["moved_via"], "copy-purge");
+        assert_eq!(json["source_purged"], true);
     }
 
     // ── user-management endpoints (P1.4) ──────────────────────────

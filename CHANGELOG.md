@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Admin destructive ops (`/admin/purge-project`, `/admin/move-project`) now
+  propagate the authenticated actor (from the auth middleware's
+  `Extension<ActorContext>`) into the admission context, so a `scope-guard`
+  admission webhook can authorize them by user. They previously built the
+  context with an empty actor, which a per-user scope-guard ACL rejected with
+  `403 user '' not allowed to purge_project`, making purge/move unusable on any
+  instance running scope-guard. `rename-project` is unaffected (it runs no
+  admission chain).
+
 ## [1.0.6] - 2026-06-14
 
 ### Changed

@@ -1822,7 +1822,8 @@ mod tests {
     /// SPA mounts at slug `/web`. `nest("/web", …)` served `/web` and
     /// `/web/<route>` but left the bare trailing-slash root `/web/` unrouted →
     /// hard 404. The SPA normalises its home to exactly `/web/`, so refreshing
-    /// the app root broke (memory.djalmajr.dev + serpro.cithyper.click/wiki).
+    /// the app root broke (both a host-root deploy and one mounted under a base
+    /// path like `/wiki`).
     #[tokio::test]
     async fn custom_spa_trailing_slash_root_serves_shell() {
         let tmp = TempDir::new().unwrap();
