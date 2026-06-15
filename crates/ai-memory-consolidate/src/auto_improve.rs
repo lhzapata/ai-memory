@@ -10,7 +10,7 @@ use ai_memory_core::{Observation, ObservationKind, PagePath, ProjectId, SessionI
 use ai_memory_llm::{ChatMessage, ChatRequest, LlmError, LlmProvider, Role, complete_structured};
 use ai_memory_store::{BriefingPage, ReaderPool, StoredPageBody};
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de};
 use thiserror::Error;
 
 const CHARS_PER_TOKEN: usize = 4;
@@ -88,12 +88,34 @@ pub enum AutoImproveError {
 pub type AutoImproveResult<T> = Result<T, AutoImproveError>;
 
 /// One evidence quote cited by a proposal.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct AutoImproveEvidence {
     /// Source page or observation label, such as `sessions/<id>.md`.
     pub page: String,
     /// Bounded quote supporting the proposed durable edit.
     pub quote: String,
+}
+
+impl<'de> Deserialize<'de> for AutoImproveEvidence {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum EvidenceInput {
+            Object { page: String, quote: String },
+            Quote(String),
+        }
+
+        match EvidenceInput::deserialize(deserializer)? {
+            EvidenceInput::Object { page, quote } => Ok(Self { page, quote }),
+            EvidenceInput::Quote(quote) => Ok(Self {
+                page: "unspecified".into(),
+                quote,
+            }),
+        }
+    }
 }
 
 /// One proposed wiki edit returned by the LLM and accepted by validation.
@@ -964,6 +986,38 @@ mod tests {
             proposals: vec![proposal("procedures/release.md", "procedure", 0.91)],
             rejected_candidates: Vec::new(),
         };
+        let (accepted, rejected, warnings) =
+            validate_response(raw, &cfg(), &ExistingPageIndex::default());
+        assert_eq!(accepted.len(), 1);
+        assert!(rejected.is_empty());
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn evidence_deserializes_bare_string_quotes() {
+        let raw: AutoImproveLlmResponse = serde_json::from_value(serde_json::json!({
+            "summary": "ok",
+            "proposals": [{
+                "operation": "create_or_update",
+                "path": "procedures/release.md",
+                "title": "Release Procedure",
+                "kind": "procedure",
+                "confidence": 0.91,
+                "rationale": "The session repeated a release workflow with verification.",
+                "evidence": ["run the full gate before release"],
+                "body_markdown": "# Release Procedure\n\nRun the full gate before release."
+            }],
+            "rejected_candidates": []
+        }))
+        .unwrap();
+
+        assert_eq!(raw.proposals[0].evidence.len(), 1);
+        assert_eq!(raw.proposals[0].evidence[0].page, "unspecified");
+        assert_eq!(
+            raw.proposals[0].evidence[0].quote,
+            "run the full gate before release"
+        );
+
         let (accepted, rejected, warnings) =
             validate_response(raw, &cfg(), &ExistingPageIndex::default());
         assert_eq!(accepted.len(), 1);
