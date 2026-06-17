@@ -468,14 +468,20 @@ async fn resolve_project_ids(
             ProjectStrategy::Basename => ai_memory_consolidate::ProjectNameStrategy::Basename,
             ProjectStrategy::RepoRoot => ai_memory_consolidate::ProjectNameStrategy::MainRepoRoot,
         };
-        // When the helper returned no repo path (basename strategy or
-        // no repo found), use the original cwd as the repo_path —
-        // `get_or_create_project` records it for future cwd-based
-        // lookups even when the project lives outside a git checkout.
+        // `repo_path` is the project's git boundary and is used as a
+        // longest-prefix match KEY for future cwds, so it must be a real
+        // repo root or nothing -- never the bare cwd. Recording the bare
+        // cwd turned any directory an agent merely opened a session in
+        // (e.g. $HOME) into a catch-all that swallowed every project
+        // nested beneath it (issue #103). The NAME still follows the
+        // strategy; repo_path is the git working dir containing the cwd
+        // (the strategy's root when it found one, else discovered here),
+        // or None when the cwd is not inside a git repo.
         ai_memory_consolidate::derive_project_name(path, strat).map(|(name, root)| {
-            let repo_path =
-                root.map_or_else(|| cwd.to_string(), |p| p.to_string_lossy().into_owned());
-            (name, Some(repo_path))
+            let repo_path = root
+                .or_else(|| ai_memory_consolidate::discover_repo_root(path).ok())
+                .map(|p| p.to_string_lossy().into_owned());
+            (name, repo_path)
         })
     }
 
@@ -495,11 +501,13 @@ async fn resolve_project_ids(
     // so a more-specific declared sub-project (via `.ai-memory.toml`,
     // whose row has a longer `repo_path`) still wins over its outer
     // parent. Skipped when the operator passed an explicit
-    // `project_override` (the override always wins) or when the
-    // derived `repo_path` is empty (cwd-less event already handled by
-    // the early returns above).
+    // `project_override` (the override always wins) or when the cwd is
+    // empty (cwd-less event already handled by the early returns above).
+    // The match is keyed on the actual cwd (`cwd_norm`), not the stored
+    // `repo_path`: `repo_path` is now the git root or None (issue #103),
+    // whereas cwd->parent matching needs the full deep path.
     let proj = if project_override.is_none()
-        && let Some(rp) = repo_path.as_deref().filter(|s| !s.is_empty())
+        && let Some(rp) = cwd_norm.as_deref().filter(|s| !s.is_empty())
         && let Some((parent_id, parent_name)) = state
             .reader
             .find_project_by_cwd_prefix(ws, rp.to_string())
@@ -1434,6 +1442,57 @@ mod tests {
             by_name,
             Some(resolved),
             "no parent match → fall through to create-by-basename"
+        );
+    }
+
+    /// Regression for #103: a session first opened in a non-git ancestor
+    /// directory (e.g. $HOME) must not become a catch-all `repo_path` that
+    /// swallows real git projects nested beneath it. The ancestor stores a
+    /// NULL repo_path (not the bare cwd), so a later cwd inside a real repo
+    /// resolves to its own project.
+    #[tokio::test]
+    async fn nongit_ancestor_does_not_become_repo_path_catch_all() {
+        let tmp = TempDir::new().unwrap();
+        let state = make_state(&tmp).await;
+
+        let home = tmp.path().join("home"); // non-git ancestor
+        std::fs::create_dir_all(&home).unwrap();
+        let (_ws_h, proj_home) = resolve_project_ids(
+            &state,
+            Some(home.to_str().unwrap()),
+            None,
+            None,
+            ProjectStrategy::Basename,
+            &ai_memory_core::ActorKey::default(),
+        )
+        .await
+        .unwrap();
+
+        let app = home.join("projects").join("app"); // real git repo under it
+        init_repo_with_commit(&app);
+        let (ws_app, proj_app) = resolve_project_ids(
+            &state,
+            Some(app.to_str().unwrap()),
+            None,
+            None,
+            ProjectStrategy::Basename,
+            &ai_memory_core::ActorKey::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_ne!(
+            proj_app, proj_home,
+            "a cwd inside a real repo must not resolve to the non-git ancestor it sits under"
+        );
+        assert_eq!(
+            state
+                .reader
+                .find_project(ws_app, "app".to_string())
+                .await
+                .unwrap(),
+            Some(proj_app),
+            "nested repo cwd must resolve to its own 'app' project",
         );
     }
 
