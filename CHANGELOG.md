@@ -18,6 +18,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mutates, so it is safe to run on any cadence. Purely semantic mislandings
   (no cwd/session anomaly) are out of scope by design.
 
+## [1.1.0] - 2026-06-16
+
+### Fixed
+- Auto-improvement scheduling now scans every known project each tick instead of
+  only the server's startup/default project. Scheduler ticks remain
+  non-overlapping; if reviewing all projects takes longer than the configured
+  interval, the next tick is delayed until the current tick finishes.
+
 ## [1.0.11] - 2026-06-15
 
 ### Added
@@ -1137,7 +1145,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Consolidator used server startup default project instead of the
   session's actual project.
 
-[Unreleased]: https://github.com/akitaonrails/ai-memory/compare/v1.0.11...HEAD
+[Unreleased]: https://github.com/akitaonrails/ai-memory/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/akitaonrails/ai-memory/releases/tag/v1.1.0
 [1.0.11]: https://github.com/akitaonrails/ai-memory/releases/tag/v1.0.11
 [1.0.10]: https://github.com/akitaonrails/ai-memory/releases/tag/v1.0.10
 [1.0.9]: https://github.com/akitaonrails/ai-memory/releases/tag/v1.0.9
