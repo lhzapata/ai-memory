@@ -219,6 +219,30 @@ pub fn format_query_v2(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+
+    #[derive(Clone)]
+    struct AssertApiKeyHeader;
+
+    impl Respond for AssertApiKeyHeader {
+        fn respond(&self, req: &Request) -> ResponseTemplate {
+            let api_key = req
+                .headers
+                .get("x-goog-api-key")
+                .and_then(|value| value.to_str().ok());
+            if api_key != Some("test-key") {
+                return ResponseTemplate::new(500).set_body_string("missing x-goog-api-key header");
+            }
+            if req.headers.get("authorization").is_some() {
+                return ResponseTemplate::new(500)
+                    .set_body_string("unexpected authorization header");
+            }
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "embedding": { "values": [1.0, 0.0, 0.0] }
+            }))
+        }
+    }
 
     #[test]
     fn normalize_model_adds_prefix() {
@@ -232,5 +256,27 @@ mod tests {
     fn v2_document_and_query_prefixes() {
         assert!(format_document_v2("hello").contains("text: hello"));
         assert!(format_query_v2("find auth").contains("query: find auth"));
+    }
+
+    #[tokio::test]
+    async fn embed_content_uses_api_key_header_not_bearer_auth() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1beta/models/gemini-embedding-001:embedContent"))
+            .respond_with(AssertApiKeyHeader)
+            .mount(&server)
+            .await;
+
+        let embedder =
+            GoogleEmbedder::new(SecretString::from("test-key"), "gemini-embedding-001", 3)
+                .expect("google embedder builds")
+                .with_base_url(server.uri());
+
+        let embedding = embedder
+            .embed_document("hello")
+            .await
+            .expect("embedContent request succeeds with API-key auth");
+
+        assert_eq!(embedding, vec![1.0, 0.0, 0.0]);
     }
 }
