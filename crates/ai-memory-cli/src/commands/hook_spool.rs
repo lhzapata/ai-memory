@@ -251,7 +251,7 @@ pub async fn drain(
                     result.dropped += 1;
                 } else {
                     // Persist the bumped attempt count for the next boundary.
-                    let _ = rewrite_entry(&path, &entry);
+                    let _ = note_retry_persist(rewrite_entry(&path, &entry));
                     result.remaining += 1;
                 }
             }
@@ -269,6 +269,13 @@ fn rewrite_entry(path: &Path, entry: &SpoolEntry) -> std::io::Result<()> {
     let bytes = serde_json::to_vec(entry)?;
     write_private(&tmp, &bytes)?;
     std::fs::rename(&tmp, path)
+}
+
+/// Report whether persisting a bumped retry count landed. A seam so the
+/// persist-outcome handling (warn-vs-not) is unit-testable without provoking a
+/// real FS fault. Fire-and-forget: the returned bool is consumed only by tests.
+fn note_retry_persist(outcome: std::io::Result<()>) -> bool {
+    outcome.is_ok()
 }
 
 /// Resolve the bearer for a synchronous request (the session-start handoff
