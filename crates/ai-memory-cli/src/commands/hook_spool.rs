@@ -271,11 +271,20 @@ fn rewrite_entry(path: &Path, entry: &SpoolEntry) -> std::io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
-/// Report whether persisting a bumped retry count landed. A seam so the
-/// persist-outcome handling (warn-vs-not) is unit-testable without provoking a
-/// real FS fault. Fire-and-forget: the returned bool is consumed only by tests.
+/// Report whether persisting a bumped retry count landed; on failure, emit a
+/// sanitized stderr warning (no path — a raw spool path can be a Windows verbatim
+/// `\\?\…` path) instead of swallowing it, so a poison entry can't retry
+/// invisibly until it ages out. Fire-and-forget: warns only, never panics or
+/// blocks; the returned bool is consumed only by tests.
 fn note_retry_persist(outcome: std::io::Result<()>) -> bool {
-    outcome.is_ok()
+    if outcome.is_err() {
+        eprintln!(
+            "ai-memory hook warning: failed to persist spool retry count; \
+             event may retry until it ages out"
+        );
+        return false;
+    }
+    true
 }
 
 /// Resolve the bearer for a synchronous request (the session-start handoff
