@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Added the standalone optional `companions/ai-memory-importer` package for
+  dry-run-by-default OMC flat Markdown wiki imports through public HTTP APIs;
+  it is isolated from the root Cargo workspace and root `cargo test --workspace`.
 - Auto-improvement reviews can now stage bounded patch proposals for existing
   `_rules/` and `procedures/` pages using append, add-section, and checked
   replace-section edits, with base-body hashes guarding materialize-to-stage

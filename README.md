@@ -447,6 +447,15 @@ Useful entry points:
   screenshots and e2e tests — lives at
   [djalmajr/ai-memory-ui](https://github.com/djalmajr/ai-memory-ui).
 
+  Richer products such as import/migration pipelines and write-capable
+  browser chat/editors should live as optional companion crates or projects
+  that call ai-memory's public HTTP/MCP surfaces. The first implemented
+  companion is the standalone OMC wiki importer at
+  [`companions/ai-memory-importer`](companions/ai-memory-importer), which is
+  intentionally not a root workspace member and is not included in root
+  `cargo test --workspace`. See
+  [`docs/companion-crates.md`](docs/companion-crates.md) for the boundary.
+
   When a reverse proxy hosts ai-memory under a URL subpath, set
   `--base-path` (or `AI_MEMORY_BASE_PATH`) so every HTTP surface moves
   together. Example: `--base-path /wiki` serves MCP at `/wiki/mcp`, hooks at
@@ -569,6 +578,7 @@ diagram, crate breakdown, schema notes, and invariants.
 | [`docs/https-via-proxy.md`](docs/https-via-proxy.md) | **HTTPS via a reverse proxy.** When you need TLS (multi-user, non-loopback) and when you don't (loopback / stdio). Copy-paste docker compose templates for Caddy + Let's Encrypt, Caddy + internal CA (LAN-only), Cloudflare Tunnel (no open ports), and external cert files; plus native-Caddy + nginx recipes. The "thinking you're secure when you're not" failure modes explicitly called out. |
 | [`docs/lifecycle-ops.md`](docs/lifecycle-ops.md) | **Read before running purge / rename / backup / restore / reset / reindex / restore-page.** Safety matrix for state-touching commands, per-project disk layout (how isolation actually works), checkpoint-based page recovery, and operator workflows for "fresh start", "snapshot before risky op", "drop one project", and rebuilding SQLite from wiki files. |
 | [`docs/auto-improvement-loop.md`](docs/auto-improvement-loop.md) | Auto-improvement design notes: Hermes-inspired scheduled review, auto-approval default, manual review opt-in, pending proposal storage, and curator work. |
+| [`docs/companion-crates.md`](docs/companion-crates.md) | Boundary and implementation plan for optional companion projects, including the standalone importer at [`companions/ai-memory-importer`](companions/ai-memory-importer), without widening core ai-memory. |
 | [`docs/llm-provider-comparison.md`](docs/llm-provider-comparison.md) | Empirical notes behind the recommended LLM defaults. |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Operational summary: data flow, crate layout, cross-cutting invariants, schema. |
 | [`docs/design-decisions.md`](docs/design-decisions.md) | The full v1 spec. |
