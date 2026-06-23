@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Hook spool batch drains now scale the `/hook/batch` request timeout with the
+  number of events in the chunk, reducing false timeout retries after a slow
+  server has successfully committed the batch.
+- Hook spool filenames now include a per-process monotonic suffix so tight loops
+  or long-lived helper processes cannot overwrite events created in the same
+  millisecond.
+- Contamination audits now treat `%` and `_` in stored `repo_path` values as
+  literal path bytes, matching runtime cwd-prefix resolution.
+- Auto-improve telemetry rejection aggregates now exclude rejected maintenance
+  report proposals (`curator_report` and `auto_improve_report`) from learning
+  rejection signals.
+- Auto-improve eval stdout capping now reads only `MAX+1` bytes before failing
+  closed, avoiding a flaky oversized-output test path while preserving the cap.
+- Updated `quinn-proto` to clear the new RustSec memory-exhaustion advisory.
+
 ## [1.2.0] - 2026-06-23
 
 ### Added

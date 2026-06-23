@@ -1561,7 +1561,7 @@ fn auto_improve_error_response(
 }
 
 // ---------------------------------------------------------------------
-// curator report
+// auto-improve telemetry report
 // ---------------------------------------------------------------------
 
 async fn handle_auto_improve_report(

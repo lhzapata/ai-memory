@@ -866,7 +866,7 @@ mod tests {
             "telemetry",
         );
         telemetry_report.kind = "auto_improve_report".into();
-        store
+        let maintenance_staged = store
             .writer
             .stage_auto_improve_run(stage_input(
                 ws,
@@ -875,6 +875,20 @@ mod tests {
             ))
             .await
             .unwrap();
+        for id in maintenance_staged.proposal_ids {
+            store
+                .writer
+                .reject_auto_improve_proposal(RejectAutoImproveProposal {
+                    workspace_id: ws,
+                    project_id: proj,
+                    proposal_id: id,
+                    reason: "maintenance rejected".into(),
+                    actor: actor.clone(),
+                    author_id: None,
+                })
+                .await
+                .unwrap();
+        }
 
         let mut eval_rejections = stage_input(ws, proj, Vec::new());
         eval_rejections.rejected_candidates_json = serde_json::json!([
@@ -1010,8 +1024,17 @@ mod tests {
             1
         );
         assert_eq!(
+            telemetry_count(&aggregate.rejections_by_reason, "maintenance rejected"),
+            0,
+            "maintenance/report proposal rejections must not pollute learning telemetry"
+        );
+        assert_eq!(
             telemetry_count(&aggregate.rejected_targets, "eval/repeat.md"),
             2
+        );
+        assert_eq!(
+            telemetry_count(&aggregate.rejected_targets, "reports/curator.md"),
+            0
         );
         assert!(
             aggregate

@@ -739,23 +739,21 @@ where
     use tokio::io::AsyncReadExt;
 
     let mut out = Vec::new();
-    let mut buf = [0_u8; 8192];
-    loop {
-        let n = reader
-            .read(&mut buf)
-            .await
-            .map_err(|e| EvalRunError::Error(format!("failed to read eval stdout: {e}")))?;
-        if n == 0 {
-            return Ok(out);
-        }
-        if out.len().saturating_add(n) > MAX_EVAL_STDOUT_BYTES {
-            return Err(EvalRunError::Error(format!(
-                "eval stdout exceeded {} bytes",
-                MAX_EVAL_STDOUT_BYTES
-            )));
-        }
-        out.extend_from_slice(&buf[..n]);
+    let cap = u64::try_from(MAX_EVAL_STDOUT_BYTES)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
+    reader
+        .take(cap)
+        .read_to_end(&mut out)
+        .await
+        .map_err(|e| EvalRunError::Error(format!("failed to read eval stdout: {e}")))?;
+    if out.len() > MAX_EVAL_STDOUT_BYTES {
+        return Err(EvalRunError::Error(format!(
+            "eval stdout exceeded {} bytes",
+            MAX_EVAL_STDOUT_BYTES
+        )));
     }
+    Ok(out)
 }
 
 fn format_eval_evidence(outcome: &AutoImproveEvalResponse, delta: Option<f64>) -> String {

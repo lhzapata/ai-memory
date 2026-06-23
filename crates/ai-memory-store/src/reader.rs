@@ -3367,7 +3367,7 @@ impl ReaderPool {
                 .collect(),
                 rejections_by_reason: auto_improve_rejection_group_counts(
                     conn,
-                    "reason",
+                    "r.reason",
                     workspace_id,
                     project_id,
                     since_created_at,
@@ -3382,7 +3382,7 @@ impl ReaderPool {
                 )?,
                 rejected_targets: auto_improve_rejection_group_counts(
                     conn,
-                    "COALESCE(target_path, '(none)')",
+                    "COALESCE(r.target_path, '(none)')",
                     workspace_id,
                     project_id,
                     since_created_at,
@@ -3666,9 +3666,7 @@ impl ReaderPool {
                      FROM projects \
                      WHERE repo_path IS NOT NULL \
                        AND length(repo_path) > 1 \
-                       AND repo_path NOT LIKE '%/' \
-                       AND repo_path NOT LIKE '%\\%%' ESCAPE '\\' \
-                       AND repo_path NOT LIKE '%\\_%' ESCAPE '\\'",
+                       AND repo_path NOT LIKE '%/'",
                 );
                 if scoped {
                     p_sql.push_str(" AND workspace_id = ?");
@@ -4285,8 +4283,10 @@ fn auto_improve_rejection_group_counts(
 ) -> rusqlite::Result<Vec<AutoImproveTelemetryCount>> {
     let sql = format!(
         "SELECT {expr} AS key, COUNT(*) AS count
-         FROM auto_improve_rejections
-         WHERE workspace_id = ?1 AND project_id = ?2 AND created_at >= ?3
+         FROM auto_improve_rejections r
+         LEFT JOIN auto_improve_proposals p ON p.id = r.source_proposal_id
+         WHERE r.workspace_id = ?1 AND r.project_id = ?2 AND r.created_at >= ?3
+           AND (r.source_proposal_id IS NULL OR COALESCE(p.kind, '') NOT IN ('curator_report', 'auto_improve_report'))
          GROUP BY key ORDER BY count DESC, key ASC LIMIT ?4"
     );
     let mut stmt = conn.prepare(&sql)?;
@@ -4314,9 +4314,11 @@ fn auto_improve_repeated_rejection_fingerprints(
     limit: i64,
 ) -> rusqlite::Result<Vec<AutoImproveTelemetryCount>> {
     let mut stmt = conn.prepare(
-        "SELECT normalized_fingerprint AS key, COUNT(*) AS count
-         FROM auto_improve_rejections
-         WHERE workspace_id = ?1 AND project_id = ?2 AND created_at >= ?3
+        "SELECT r.normalized_fingerprint AS key, COUNT(*) AS count
+         FROM auto_improve_rejections r
+         LEFT JOIN auto_improve_proposals p ON p.id = r.source_proposal_id
+         WHERE r.workspace_id = ?1 AND r.project_id = ?2 AND r.created_at >= ?3
+           AND (r.source_proposal_id IS NULL OR COALESCE(p.kind, '') NOT IN ('curator_report', 'auto_improve_report'))
          GROUP BY normalized_fingerprint HAVING count > 1
          ORDER BY count DESC, key ASC LIMIT ?4",
     )?;

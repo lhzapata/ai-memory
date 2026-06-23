@@ -313,9 +313,8 @@ async fn handle_hook_batch(
 
 /// Parse the `?event=…&agent=…` query of a spooled hook URL into [`HookQuery`],
 /// mirroring axum's `Query` extractor (both use `serde_urlencoded`). A URL with
-/// no query, or an unparseable one, yields the default (empty `event`) — which
-/// `from_query_and_body` maps to an unknown event that `process` skips, so a
-/// malformed item can't error the whole batch.
+/// no query, or an unparseable one, yields the default query; downstream
+/// fail-fast batch handling decides whether that default envelope can be stored.
 fn parse_hook_query(url: &str) -> HookQuery {
     let qs = url.split_once('?').map_or("", |(_, q)| q);
     serde_urlencoded::from_str(qs).unwrap_or_default()

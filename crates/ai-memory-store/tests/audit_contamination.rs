@@ -189,6 +189,83 @@ async fn audit_ignores_home_repo_path_when_home_is_provided() {
 }
 
 #[tokio::test]
+async fn audit_prefix_paths_treat_percent_and_underscore_literally() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let conn = Connection::open(store.db_path()).unwrap();
+    let now = 1_700_000_000_000_i64;
+    let (ws, underscore, percent, sibling, wrong_session, clean_session, sibling_session) =
+        (id(1), id(2), id(3), id(4), id(5), id(6), id(7));
+
+    conn.execute(
+        "INSERT INTO workspaces (id, name, created_at) VALUES (?1, 'w', ?2)",
+        params![&ws[..], now],
+    )
+    .unwrap();
+    for (pid, name, repo_path) in [
+        (&underscore, "under_score", "/w/a_b"),
+        (&percent, "per_cent", "/w/a%b"),
+        (&sibling, "sibling", "/w/axb"),
+    ] {
+        conn.execute(
+            "INSERT INTO projects (id, workspace_id, name, repo_path, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![&pid[..], &ws[..], name, repo_path, now],
+        )
+        .unwrap();
+    }
+    conn.execute(
+        "INSERT INTO sessions (id, workspace_id, project_id, agent_kind, cwd, started_at) \
+         VALUES (?1, ?2, ?3, 'claude-code', ?4, ?5)",
+        params![
+            &wrong_session[..],
+            &ws[..],
+            &underscore[..],
+            "/w/a%b/sub",
+            now
+        ],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO sessions (id, workspace_id, project_id, agent_kind, cwd, started_at) \
+         VALUES (?1, ?2, ?3, 'claude-code', ?4, ?5)",
+        params![
+            &clean_session[..],
+            &ws[..],
+            &underscore[..],
+            "/w/a_b/sub",
+            now
+        ],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO sessions (id, workspace_id, project_id, agent_kind, cwd, started_at) \
+         VALUES (?1, ?2, ?3, 'claude-code', ?4, ?5)",
+        params![
+            &sibling_session[..],
+            &ws[..],
+            &sibling[..],
+            "/w/axb/sub",
+            now
+        ],
+    )
+    .unwrap();
+    drop(conn);
+
+    let report = store.reader.audit_contamination(None, None).await.unwrap();
+
+    assert_eq!(report.summary.sessions_misbucketed, 1);
+    let finding = report
+        .findings
+        .iter()
+        .find(|f| f.check == "session_wrong_bucket")
+        .expect("percent repo_path mismatch should be visible to audit");
+    assert_eq!(finding.landed_project, "under_score");
+    assert_eq!(finding.expected_project.as_deref(), Some("per_cent"));
+    assert_eq!(finding.cwd.as_deref(), Some("/w/a%b/sub"));
+}
+
+#[tokio::test]
 async fn audit_scope_restricts_to_landed_bucket() {
     let tmp = tempfile::tempdir().unwrap();
     let store = Store::open(tmp.path()).unwrap();

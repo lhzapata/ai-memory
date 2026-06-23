@@ -100,8 +100,9 @@ pending_path = "_pending/auto-improve"
 
 # Optional executable evaluation gate for selected proposal targets. Disabled by
 # default; operators supply the command and scoring policy. The command is run
-# directly (not through a shell) with JSON on stdin and must print JSON such as
-# { "score_before": 0.72, "score_after": 0.76, "passed": true }.
+# directly (not through a shell), split on whitespace, with JSON on stdin. Use a
+# wrapper script for paths with spaces, custom environment, or multiple commands.
+# It must print JSON such as { "score_before": 0.72, "score_after": 0.76, "passed": true }.
 [auto_improve.eval]
 enabled = false
 command = ""

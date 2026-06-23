@@ -19,6 +19,7 @@
 //! renewed rather than rejected).
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ai_memory_llm::{OidcToken, refresh_access_token};
@@ -48,6 +49,8 @@ const MAX_BATCH_ITEMS: usize = 256;
 /// `DefaultBodyLimit` with margin for JSON framing. A chunk always carries at
 /// least one event even if that event alone exceeds this.
 const MAX_BATCH_BYTES: usize = 8 * 1024 * 1024;
+
+static ENQUEUE_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// How a spooled event authenticates to the server when drained.
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
@@ -108,14 +111,20 @@ fn now_ms() -> u64 {
 }
 
 /// Append an event to the spool, atomically (temp file + rename) and 0600 on
-/// Unix. Never touches the network. Each hook invocation enqueues exactly one
-/// event, so the `<ms>-<pid>` name is unique.
+/// Unix. Never touches the network. File names include a per-process monotonic
+/// suffix so tight loops or helper processes can enqueue several events in the
+/// same millisecond without clobbering an earlier event.
 ///
 /// # Errors
 /// Returns an error only when the spool file cannot be written.
 pub fn enqueue(spool: &Path, entry: &SpoolEntry) -> std::io::Result<()> {
     std::fs::create_dir_all(spool)?;
-    let name = format!("{:013}-{}.json", entry.created_ms, std::process::id());
+    let seq = ENQUEUE_SEQ.fetch_add(1, Ordering::Relaxed);
+    let name = format!(
+        "{:013}-{}-{seq:016x}.json",
+        entry.created_ms,
+        std::process::id()
+    );
     let tmp = spool.join(format!("{name}.tmp"));
     let final_path = spool.join(&name);
     let bytes = serde_json::to_vec(entry)?;
@@ -276,19 +285,13 @@ pub async fn drain(
                 result.remaining += chunk.len().saturating_sub(1) + files.len().saturating_sub(idx);
                 break;
             };
-            if started.elapsed() >= total_budget {
+            let Some(remaining_budget) = total_budget.checked_sub(started.elapsed()) else {
                 result.remaining += chunk.len() + files.len().saturating_sub(idx);
                 break;
-            }
-            match post_batch(
-                &client,
-                &base,
-                &payload,
-                bearer.as_deref(),
-                per_event_timeout,
-            )
-            .await
-            {
+            };
+            let batch_timeout =
+                batch_request_timeout(per_event_timeout, remaining_budget, chunk.len());
+            match post_batch(&client, &base, &payload, bearer.as_deref(), batch_timeout).await {
                 BatchOutcome::Accepted(k) => {
                     let k = k.min(chunk.len());
                     for (path, _) in &chunk[..k] {
@@ -387,6 +390,18 @@ pub async fn drain(
         }
     }
     result
+}
+
+fn batch_request_timeout(
+    per_event_timeout: Duration,
+    remaining_budget: Duration,
+    item_count: usize,
+) -> Duration {
+    let item_count = u32::try_from(item_count.max(1)).unwrap_or(u32::MAX);
+    per_event_timeout
+        .checked_mul(item_count)
+        .unwrap_or(Duration::MAX)
+        .min(remaining_budget)
 }
 
 fn load_live_entry(path: &Path, result: &mut DrainResult) -> Option<SpoolEntry> {
@@ -607,6 +622,25 @@ mod tests {
     }
 
     #[test]
+    fn enqueue_names_are_unique_in_tight_loop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let spool = spool_dir(tmp.path());
+        for i in 0..MAX_SPOOL_FILES {
+            let mut entry = entry_for(
+                format!("https://x/hook?event=e{i}"),
+                "{}".into(),
+                None,
+                false,
+            );
+            entry.created_ms = 42;
+            enqueue(&spool, &entry).unwrap();
+        }
+
+        let files = list_entries(&spool).unwrap();
+        assert_eq!(files.len(), MAX_SPOOL_FILES);
+    }
+
+    #[test]
     fn enqueue_prunes_oldest_files_when_spool_exceeds_limit() {
         let tmp = tempfile::tempdir().unwrap();
         let spool = spool_dir(tmp.path());
@@ -643,13 +677,7 @@ mod tests {
                 None,
                 false,
             );
-            // Distinct filenames: enqueue uses ms+pid, so space them out.
             enqueue(&spool, &e).unwrap();
-            std::fs::rename(
-                spool.join(format!("{:013}-{}.json", e.created_ms, std::process::id())),
-                spool.join(format!("evt-{i}.json")),
-            )
-            .unwrap();
         }
         let r = drain(
             &spool,
@@ -842,6 +870,39 @@ mod tests {
         addr.to_string()
     }
 
+    async fn serve_delayed_batch_hook(
+        req_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        delay: Duration,
+    ) -> String {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = listener.accept().await {
+                let rc = req_count.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0_u8; 65536];
+                    let n = s.read(&mut buf).await.unwrap_or(0);
+                    rc.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let payload = req.split("\r\n\r\n").nth(1).unwrap_or("");
+                    let accepted = serde_json::from_str::<serde_json::Value>(payload)
+                        .ok()
+                        .and_then(|v| v.as_array().map(Vec::len))
+                        .unwrap_or(0);
+                    tokio::time::sleep(delay).await;
+                    let body = format!("{{\"accepted\":{accepted}}}");
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = s.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+        addr.to_string()
+    }
+
     fn write_spool_entry(spool: &Path, name: &str, url: String) {
         write_spool_entry_with_body(spool, name, url, "{}".into());
     }
@@ -921,6 +982,47 @@ mod tests {
             req_count.load(std::sync::atomic::Ordering::SeqCst),
             1,
             "three events ride ONE /hook/batch request (RTT amortized)"
+        );
+    }
+
+    #[tokio::test]
+    async fn slow_batch_success_uses_chunk_scaled_timeout_and_deletes_once() {
+        let req_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let addr = serve_delayed_batch_hook(req_count.clone(), Duration::from_millis(200)).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let spool = spool_dir(tmp.path());
+        for i in 0..3 {
+            write_spool_entry(
+                &spool,
+                &format!("evt-{i}.json"),
+                format!("http://{addr}/hook?event=e{i}"),
+            );
+        }
+
+        let r = drain(
+            &spool,
+            tmp.path(),
+            Duration::from_secs(2),
+            Duration::from_millis(100),
+        )
+        .await;
+
+        assert_eq!(r.sent, 3);
+        assert_eq!(r.remaining, 0);
+        assert!(list_entries(&spool).unwrap().is_empty());
+
+        let second = drain(
+            &spool,
+            tmp.path(),
+            Duration::from_secs(2),
+            Duration::from_millis(100),
+        )
+        .await;
+        assert_eq!(second, DrainResult::default());
+        assert_eq!(
+            req_count.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a slow successful batch is not retried after the response lands"
         );
     }
 
