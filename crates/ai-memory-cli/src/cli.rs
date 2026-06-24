@@ -1079,8 +1079,8 @@ pub struct HookArgs {
     /// Default project strategy baked in by `install-hooks
     /// --project-strategy`. Applies only when a `.ai-memory.toml`
     /// marker does not pin its own `project_strategy`.
-    #[arg(long)]
-    pub project_strategy: Option<String>,
+    #[arg(long, value_enum)]
+    pub project_strategy: Option<ProjectStrategyArg>,
 }
 
 /// Arguments for `install-hooks`.
@@ -1623,6 +1623,26 @@ mod tests {
         assert!(
             result.is_err(),
             "an unknown --project-strategy value must be rejected by value_enum"
+        );
+    }
+
+    #[test]
+    fn hook_project_strategy_rejects_invalid_value() {
+        let result = Cli::try_parse_from([
+            "ai-memory",
+            "hook",
+            "--event",
+            "session-start",
+            "--agent",
+            "claude-code",
+            "--server-url",
+            "http://127.0.0.1:49374",
+            "--project-strategy",
+            "bogus",
+        ]);
+        assert!(
+            result.is_err(),
+            "an unknown hook --project-strategy value must be rejected by value_enum"
         );
     }
 

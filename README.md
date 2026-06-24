@@ -279,6 +279,10 @@ other server / hook you have configured, and write a timestamped
 scripts are staged into `~/.local/share/ai-memory/hooks/<agent>/`
 automatically; re-running overwrites them so future image updates ship
 updated hooks. Drop `--apply` to print the snippet instead of mutating.
+If your agent often starts inside repository subdirectories or linked
+worktrees, add `--project-strategy repo-root` to `install-hooks` so captures
+collapse to the main git repo name; see [`docs/install.md`](docs/install.md)
+and [`docs/marker-file.md`](docs/marker-file.md) for details.
 
 The Docker wrapper also bridges thin-client commands such as
 `ai-memory status` and `ai-memory bootstrap` back to the host's

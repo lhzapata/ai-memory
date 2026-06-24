@@ -183,19 +183,19 @@ pub fn run(config: &Config, args: InstallHooksArgs) -> Result<()> {
         }
         AgentChoice::Codex => {
             let hooks_dir = resolve_hooks_dir(args.hooks_dir.as_deref(), args.agent)?;
-            render_agent("codex", &hooks_dir, &server_url, auth)
+            render_agent("codex", &hooks_dir, &server_url, auth, strategy)
         }
         AgentChoice::Cursor => {
             let hooks_dir = resolve_hooks_dir(args.hooks_dir.as_deref(), args.agent)?;
-            render_agent("cursor", &hooks_dir, &server_url, auth)
+            render_agent("cursor", &hooks_dir, &server_url, auth, strategy)
         }
         AgentChoice::GeminiCli => {
             let hooks_dir = resolve_hooks_dir(args.hooks_dir.as_deref(), args.agent)?;
-            render_agent("gemini-cli", &hooks_dir, &server_url, auth)
+            render_agent("gemini-cli", &hooks_dir, &server_url, auth, strategy)
         }
         AgentChoice::AntigravityCli => {
             let hooks_dir = resolve_hooks_dir(args.hooks_dir.as_deref(), args.agent)?;
-            render_agent("antigravity-cli", &hooks_dir, &server_url, auth)
+            render_agent("antigravity-cli", &hooks_dir, &server_url, auth, strategy)
         }
         AgentChoice::Grok => {
             let hooks_dir = resolve_hooks_dir(args.hooks_dir.as_deref(), args.agent)?;
@@ -1634,29 +1634,59 @@ fn render_agent(
     hooks_dir: &Path,
     server_url: &str,
     auth_token: Option<&str>,
+    project_strategy: Option<&str>,
 ) -> Result<()> {
-    println!("# {label} hook scripts (manual install — wire each to the matching event)");
-    println!("# Hook scripts: {}", hooks_dir.display());
-    println!("# AI-memory server URL: {server_url}");
+    print!(
+        "{}",
+        render_agent_output(label, hooks_dir, server_url, auth_token, project_strategy)?
+    );
+    Ok(())
+}
+
+fn render_agent_output(
+    label: &str,
+    hooks_dir: &Path,
+    server_url: &str,
+    auth_token: Option<&str>,
+    project_strategy: Option<&str>,
+) -> Result<String> {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "# {label} hook scripts (manual install — wire each to the matching event)\n"
+    ));
+    out.push_str(&format!("# Hook scripts: {}\n", hooks_dir.display()));
+    out.push_str(&format!("# AI-memory server URL: {server_url}\n"));
     if auth_token.is_some() {
-        println!("# Auth: set AI_MEMORY_AUTH_TOKEN in each hook's environment to the");
-        println!("#       value passed via --auth-token (omitted from this printout).");
+        out.push_str("# Auth: set AI_MEMORY_AUTH_TOKEN in each hook's environment to the\n");
+        out.push_str("#       value passed via --auth-token (omitted from this printout).\n");
     } else {
-        println!("# Auth: server requires no bearer token. To require one, generate a");
-        println!("#       token with `ai-memory generate-auth-token` and pass it via");
-        println!("#       --auth-token here AND set AI_MEMORY_AUTH_TOKEN on the server.");
+        out.push_str("# Auth: server requires no bearer token. To require one, generate a\n");
+        out.push_str("#       token with `ai-memory generate-auth-token` and pass it via\n");
+        out.push_str("#       --auth-token here AND set AI_MEMORY_AUTH_TOKEN on the server.\n");
     }
-    println!();
+    out.push('\n');
     for entry in std::fs::read_dir(hooks_dir)? {
         let entry = entry?;
         let p = entry.path();
         if p.is_file() && p.extension().is_some_and(|e| e == hook_script_extension()) {
-            println!("- {}", p.display());
+            out.push_str(&format!("- {}\n", p.display()));
         }
     }
-    println!();
-    println!("Set AI_MEMORY_HOOK_URL in each hook's environment to override the default.");
-    Ok(())
+    out.push('\n');
+    out.push_str("Set AI_MEMORY_HOOK_URL in each hook's environment to override the default.\n");
+    if let Some(instruction) = manual_agent_project_strategy_instruction(project_strategy) {
+        out.push_str(&instruction);
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+fn manual_agent_project_strategy_instruction(project_strategy: Option<&str>) -> Option<String> {
+    project_strategy.map(|strategy| {
+        format!(
+            "Set AI_MEMORY_PROJECT_STRATEGY={strategy} in each hook's environment to use the requested project strategy."
+        )
+    })
 }
 
 /// Copy the bundled hook scripts to a stable user-global location
@@ -2196,6 +2226,36 @@ mod tests {
     #[test]
     fn validate_as_user_passes_with_both_flags() {
         assert!(validate_as_user(Some("alice"), Some("some-token")).is_ok());
+    }
+
+    #[test]
+    fn manual_agent_render_mentions_repo_root_project_strategy() {
+        let temp = TempDir::new().unwrap();
+        stub_scripts(temp.path(), &["session-start.sh"]);
+        for agent in ["codex", "cursor", "gemini-cli", "antigravity-cli"] {
+            let output = render_agent_output(
+                agent,
+                temp.path(),
+                "http://127.0.0.1:49374",
+                None,
+                Some("repo-root"),
+            )
+            .unwrap_or_else(|err| panic!("failed to render {agent}: {err}"));
+            assert!(
+                output.contains("AI_MEMORY_PROJECT_STRATEGY=repo-root"),
+                "{agent} manual output must tell users to set the strategy env: {output}"
+            );
+        }
+    }
+
+    #[test]
+    fn manual_agent_render_omits_project_strategy_by_default() {
+        let temp = TempDir::new().unwrap();
+        stub_scripts(temp.path(), &["session-start.sh"]);
+        let output =
+            render_agent_output("codex", temp.path(), "http://127.0.0.1:49374", None, None)
+                .unwrap();
+        assert!(!output.contains("AI_MEMORY_PROJECT_STRATEGY"));
     }
 
     #[test]
