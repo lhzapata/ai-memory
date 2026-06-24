@@ -1032,6 +1032,35 @@ pub struct LlmTestArgs {
     pub api_key: Option<String>,
 }
 
+/// Project-resolution strategy to bake into installed hooks.
+///
+/// `basename` (the default) bakes nothing — generated hooks behave
+/// exactly as before. `repo-root` bakes a default so every session
+/// resolves its project from the main git repo root (collapsing
+/// subdirectories and worktrees) without a per-repo `.ai-memory.toml`
+/// marker. A marker's own `project_strategy` still wins.
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub enum ProjectStrategyArg {
+    /// `project = basename(cwd)` — the default; bakes nothing.
+    Basename,
+    /// `project = basename(main git repo root)` — collapses subdirs/worktrees.
+    /// clap renders this value as `repo-root`.
+    RepoRoot,
+}
+
+impl ProjectStrategyArg {
+    /// Normalize to what the hook command should bake. `None` bakes
+    /// nothing (behavior unchanged); `Some("repo-root")` bakes the
+    /// repo-root default into the generated hooks.
+    #[must_use]
+    pub fn baked(self) -> Option<&'static str> {
+        match self {
+            Self::Basename => None,
+            Self::RepoRoot => Some("repo-root"),
+        }
+    }
+}
+
 /// Arguments for `hook` — emit one lifecycle event natively.
 #[derive(Debug, Args)]
 pub struct HookArgs {
@@ -1047,6 +1076,11 @@ pub struct HookArgs {
     /// Optional bearer token (`Authorization: Bearer <token>`).
     #[arg(long, hide_env_values = true)]
     pub auth_token: Option<String>,
+    /// Default project strategy baked in by `install-hooks
+    /// --project-strategy`. Applies only when a `.ai-memory.toml`
+    /// marker does not pin its own `project_strategy`.
+    #[arg(long, value_enum)]
+    pub project_strategy: Option<ProjectStrategyArg>,
 }
 
 /// Arguments for `install-hooks`.
@@ -1104,6 +1138,14 @@ pub struct InstallHooksArgs {
     /// For OpenClaw, this is the generated plugin package directory.
     #[arg(long)]
     pub config_file: Option<PathBuf>,
+    /// Default project strategy to bake into the installed hooks.
+    /// `repo-root` makes every session resolve its project from the main
+    /// git repo root (collapsing subdirectories and worktrees) without a
+    /// per-repo `.ai-memory.toml` marker. A marker's own `project_strategy`
+    /// still wins. Defaults to `basename`, which bakes nothing and is
+    /// identical to prior behavior.
+    #[arg(long, value_enum, default_value_t = ProjectStrategyArg::Basename)]
+    pub project_strategy: ProjectStrategyArg,
 }
 
 /// Arguments for `install-mcp`.
@@ -1537,6 +1579,71 @@ mod tests {
             panic!("expected install-hooks command for grok");
         };
         assert!(matches!(hook_args.agent, AgentChoice::Grok));
+    }
+
+    #[test]
+    fn install_hooks_project_strategy_repo_root_parses() {
+        let cli = Cli::try_parse_from([
+            "ai-memory",
+            "install-hooks",
+            "--agent",
+            "claude-code",
+            "--project-strategy",
+            "repo-root",
+        ])
+        .unwrap_or_else(|e| panic!("failed to parse --project-strategy repo-root: {e}"));
+        let Command::InstallHooks(args) = cli.command else {
+            panic!("expected install-hooks command");
+        };
+        assert!(matches!(
+            args.project_strategy,
+            ProjectStrategyArg::RepoRoot
+        ));
+        assert_eq!(args.project_strategy.baked(), Some("repo-root"));
+    }
+
+    #[test]
+    fn install_hooks_project_strategy_defaults_to_basename() {
+        let cli = Cli::try_parse_from(["ai-memory", "install-hooks", "--agent", "claude-code"])
+            .expect("install-hooks parses without --project-strategy");
+        let Command::InstallHooks(args) = cli.command else {
+            panic!("expected install-hooks command");
+        };
+        assert!(matches!(
+            args.project_strategy,
+            ProjectStrategyArg::Basename
+        ));
+        assert_eq!(args.project_strategy.baked(), None);
+    }
+
+    #[test]
+    fn install_hooks_project_strategy_rejects_invalid_value() {
+        let result =
+            Cli::try_parse_from(["ai-memory", "install-hooks", "--project-strategy", "bogus"]);
+        assert!(
+            result.is_err(),
+            "an unknown --project-strategy value must be rejected by value_enum"
+        );
+    }
+
+    #[test]
+    fn hook_project_strategy_rejects_invalid_value() {
+        let result = Cli::try_parse_from([
+            "ai-memory",
+            "hook",
+            "--event",
+            "session-start",
+            "--agent",
+            "claude-code",
+            "--server-url",
+            "http://127.0.0.1:49374",
+            "--project-strategy",
+            "bogus",
+        ]);
+        assert!(
+            result.is_err(),
+            "an unknown hook --project-strategy value must be rejected by value_enum"
+        );
     }
 
     #[test]

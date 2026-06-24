@@ -102,6 +102,24 @@ if command -v git >/dev/null 2>&1; then
         "&cwd=$REPO/crates/cli&workspace=oss&project=acme-api&project_strategy=repo-root" \
         "$QSR"
 
+    rm -f "$REPO/.ai-memory.toml"
+    AI_MEMORY_PROJECT_STRATEGY=repo-root
+    export AI_MEMORY_PROJECT_STRATEGY
+    QSE=$(ai_memory_marker_qs "$REPO/crates/cli")
+    assert_eq "repo-root env: no marker resolves to repo basename" \
+        "&cwd=$REPO/crates/cli&project=acme-api&project_strategy=repo-root" \
+        "$QSE"
+
+    printf 'workspace = "oss"\nproject = "pinned"\nproject_strategy = "basename"\n' \
+        >"$REPO/.ai-memory.toml"
+    QSO=$(ai_memory_marker_qs "$REPO/crates/cli")
+    assert_eq "marker project strategy overrides env default" \
+        "&cwd=$REPO/crates/cli&workspace=oss&project=pinned&project_strategy=basename" \
+        "$QSO"
+    unset AI_MEMORY_PROJECT_STRATEGY
+
+    printf 'workspace = "oss"\nproject_strategy = "repo-root"\n' >"$REPO/.ai-memory.toml"
+
     # A linked worktree whose directory lives OUTSIDE the main repo tree
     # (a common layout: tools that keep worktrees in a separate directory)
     # has no .ai-memory.toml ancestor of its own, yet still collapses to the

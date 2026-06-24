@@ -24,7 +24,8 @@ pub(crate) fn apply(
     args: &InstallHooksArgs,
 ) -> Result<()> {
     let plugin_dir = resolve_plugin_dir(args)?;
-    let outcomes = write_package(&plugin_dir, server_url, auth_token)?;
+    let strategy = args.project_strategy.baked();
+    let outcomes = write_package(&plugin_dir, server_url, auth_token, strategy)?;
     for (path, outcome) in &outcomes {
         println!(
             "✓ {} {} ({})",
@@ -59,7 +60,7 @@ pub(crate) fn apply(
 }
 
 /// Print the generated package for manual installation.
-pub(crate) fn render(server_url: &str, auth_token: Option<&str>) {
+pub(crate) fn render(server_url: &str, auth_token: Option<&str>, project_strategy: Option<&str>) {
     println!("# OpenClaw native plugin package");
     println!("# Re-run with `--apply` to write the package and call:");
     println!("#   openclaw plugins install --link <package-dir> --force");
@@ -71,7 +72,7 @@ pub(crate) fn render(server_url: &str, auth_token: Option<&str>) {
     println!("## {MANIFEST_JSON}");
     println!("{}", manifest_json());
     println!("## {ENTRYPOINT_TS}");
-    println!("{}", build_plugin(server_url, auth_token));
+    println!("{}", build_plugin(server_url, auth_token, project_strategy));
 }
 
 fn outcome_detail(outcome: ApplyOutcome) -> &'static str {
@@ -100,11 +101,15 @@ fn write_package(
     plugin_dir: &Path,
     server_url: &str,
     auth_token: Option<&str>,
+    project_strategy: Option<&str>,
 ) -> Result<Vec<(PathBuf, ApplyOutcome)>> {
     let files = [
         (PACKAGE_JSON, package_json()),
         (MANIFEST_JSON, manifest_json()),
-        (ENTRYPOINT_TS, build_plugin(server_url, auth_token)),
+        (
+            ENTRYPOINT_TS,
+            build_plugin(server_url, auth_token, project_strategy),
+        ),
     ];
     let mut outcomes = Vec::with_capacity(files.len());
     for (name, body) in files {
@@ -188,10 +193,78 @@ pub(crate) fn manifest_json() -> String {
         + "\n"
 }
 
-fn build_plugin(server_url: &str, auth_token: Option<&str>) -> String {
+/// Emit the OpenClaw plugin's `applyMarkerParams` TypeScript function.
+///
+/// `None` reproduces the historical marker-only function byte-for-byte (the
+/// OpenClaw variant always sets `cwd`, even with no marker). `Some(default)`
+/// prepends a `DEFAULT_PROJECT_STRATEGY` const and applies that install-time
+/// default when no marker pins a `project_strategy` (#128); a marker's own
+/// `project` / `project_strategy` still win (§3.3). Mirrors the opencode/omp
+/// `ts_apply_marker_params` in `install_hooks.rs`.
+fn apply_marker_params_ts(default_strategy: Option<&str>) -> String {
+    let Some(default) = default_strategy else {
+        return r#"function applyMarkerParams(url: URL, cwd: string | undefined): void {
+  if (!cwd) return;
+  url.searchParams.set("cwd", cwd);
+  const marker = findMarker(cwd);
+  if (!marker) return;
+  try {
+    const body = readFileSync(marker, "utf8");
+    const workspace = tomlKey(body, "workspace");
+    const project = tomlKey(body, "project");
+    const projectStrategy = tomlKey(body, "project_strategy");
+    if (workspace) url.searchParams.set("workspace", workspace);
+    if (project) url.searchParams.set("project", project);
+    if (projectStrategy) url.searchParams.set("project_strategy", projectStrategy);
+    if (!project && (projectStrategy === "repo-root" || projectStrategy === "repo_root")) {
+      const repoProject = repoRootProject(cwd);
+      if (repoProject) url.searchParams.set("project", repoProject);
+    }
+  } catch (_e) {
+  }
+}"#
+        .to_string();
+    };
+    let body = r#"function applyMarkerParams(url: URL, cwd: string | undefined): void {
+  if (!cwd) return;
+  url.searchParams.set("cwd", cwd);
+  let workspace: string | undefined;
+  let project: string | undefined;
+  let projectStrategy: string | undefined;
+  const marker = findMarker(cwd);
+  if (marker) {
+    try {
+      const body = readFileSync(marker, "utf8");
+      workspace = tomlKey(body, "workspace");
+      project = tomlKey(body, "project");
+      projectStrategy = tomlKey(body, "project_strategy");
+    } catch (_e) {
+    }
+  }
+  if (!projectStrategy) projectStrategy = DEFAULT_PROJECT_STRATEGY;
+  if (!project && (projectStrategy === "repo-root" || projectStrategy === "repo_root")) {
+    const repoProject = repoRootProject(cwd);
+    if (repoProject) project = repoProject;
+  }
+  if (workspace) url.searchParams.set("workspace", workspace);
+  if (project) url.searchParams.set("project", project);
+  if (projectStrategy) url.searchParams.set("project_strategy", projectStrategy);
+}"#;
+    format!(
+        "const DEFAULT_PROJECT_STRATEGY = {};\n{body}",
+        ts_string_literal(default)
+    )
+}
+
+fn build_plugin(
+    server_url: &str,
+    auth_token: Option<&str>,
+    project_strategy: Option<&str>,
+) -> String {
     let token_line = auth_token
         .map(|t| format!("const TOKEN: string | null = {};\n", ts_string_literal(t)))
         .unwrap_or_else(|| "const TOKEN: string | null = null;\n".to_string());
+    let apply_marker_params = apply_marker_params_ts(project_strategy);
     format!(
         r#"// Auto-generated by `ai-memory install-hooks --agent openclaw --apply`.
 // Edit by re-running the command, not by hand. install-hooks owns
@@ -260,26 +333,7 @@ function repoRootProject(cwd: string | undefined): string | undefined {{
     return undefined;
   }}
 }}
-function applyMarkerParams(url: URL, cwd: string | undefined): void {{
-  if (!cwd) return;
-  url.searchParams.set("cwd", cwd);
-  const marker = findMarker(cwd);
-  if (!marker) return;
-  try {{
-    const body = readFileSync(marker, "utf8");
-    const workspace = tomlKey(body, "workspace");
-    const project = tomlKey(body, "project");
-    const projectStrategy = tomlKey(body, "project_strategy");
-    if (workspace) url.searchParams.set("workspace", workspace);
-    if (project) url.searchParams.set("project", project);
-    if (projectStrategy) url.searchParams.set("project_strategy", projectStrategy);
-    if (!project && (projectStrategy === "repo-root" || projectStrategy === "repo_root")) {{
-      const repoProject = repoRootProject(cwd);
-      if (repoProject) url.searchParams.set("project", repoProject);
-    }}
-  }} catch (_e) {{
-  }}
-}}
+{apply_marker_params}
 
 function textFrom(value: unknown): string {{
   if (value === null || value === undefined) return "";
@@ -448,7 +502,7 @@ mod tests {
     fn package_has_manifest_and_hook_entrypoint() {
         let package = package_json();
         let manifest = manifest_json();
-        let plugin = build_plugin("http://127.0.0.1:49374", Some("tok"));
+        let plugin = build_plugin("http://127.0.0.1:49374", Some("tok"), None);
 
         assert!(package.contains(r#""extensions""#));
         assert!(package.contains(r#""./index.ts""#));
@@ -487,9 +541,31 @@ mod tests {
     }
 
     #[test]
+    fn openclaw_plugin_bakes_repo_root_default() {
+        let plugin = build_plugin("http://127.0.0.1:49374", Some("tok"), Some("repo-root"));
+        assert!(
+            plugin.contains("const DEFAULT_PROJECT_STRATEGY = \"repo-root\";"),
+            "repo-root install default must bake the const: {plugin}"
+        );
+        assert!(
+            plugin.contains("if (!projectStrategy) projectStrategy = DEFAULT_PROJECT_STRATEGY;"),
+            "must apply the default when a marker pins no strategy: {plugin}"
+        );
+    }
+
+    #[test]
+    fn openclaw_plugin_default_omits_baked_strategy() {
+        let plugin = build_plugin("http://127.0.0.1:49374", Some("tok"), None);
+        assert!(
+            !plugin.contains("DEFAULT_PROJECT_STRATEGY"),
+            "basename default must bake no strategy: {plugin}"
+        );
+    }
+
+    #[test]
     fn package_writes_all_required_files() {
         let tmp = TempDir::new().unwrap();
-        let outcomes = write_package(tmp.path(), "http://127.0.0.1:49374", None).unwrap();
+        let outcomes = write_package(tmp.path(), "http://127.0.0.1:49374", None, None).unwrap();
 
         assert_eq!(outcomes.len(), 3);
         assert!(tmp.path().join(PACKAGE_JSON).is_file());

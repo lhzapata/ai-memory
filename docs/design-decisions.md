@@ -204,6 +204,8 @@ Lesson from basic-memory's v0.20 trauma: `(workspace, project, page_path)`. Even
 
 Project resolution chain: explicit param → server's default → cwd-based heuristic (match repo root) → error.
 
+**Install-time `project_strategy` default (#128).** `basename(cwd)` stays the v1 default, but an agent shell that `cd`s into a subdirectory and stays there silently forks the rest of the session into a phantom project named after the subdir. A `.ai-memory.toml` marker with `project_strategy = "repo-root"` fixes this (#16, #23, #111) but needs a marker in (or above) every repo; a runtime env-var fallback that the *user* sets was deliberately rejected in #16. `install-hooks --project-strategy repo-root` instead **bakes** the strategy into the generated hook command (and the OpenCode / OMP / OpenClaw plugins) at install time — the same status as the already-baked `AI_MEMORY_AUTH_TOKEN` / `AI_MEMORY_HOOK_URL` / `--data-dir`, not a user runtime override. This is a client/install-time-only change: the server already parses `project_strategy=repo-root`. A marker's own `project_strategy` / `project` still win, and the default stays `basename` (baking nothing) so existing installs are byte-identical.
+
 ## 12. Operability
 
 - **Single binary**, statically-linked where possible. Distroless Docker image. **Absolute data path** by default (`dirs::data_local_dir().join("ai-memory")`); log it loudly on startup (agentmemory #303 lesson).

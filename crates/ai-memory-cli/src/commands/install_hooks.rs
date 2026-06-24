@@ -173,35 +173,36 @@ pub fn run(config: &Config, args: InstallHooksArgs) -> Result<()> {
             AgentChoice::Openclaw => openclaw_plugin::apply(&server_url, auth, &args),
         };
     }
+    let strategy = args.project_strategy.baked();
     match args.agent {
-        AgentChoice::OpenCode => render_opencode_plugin(&server_url, auth),
-        AgentChoice::Omp => render_omp_extension(&server_url, auth),
+        AgentChoice::OpenCode => render_opencode_plugin(&server_url, auth, strategy),
+        AgentChoice::Omp => render_omp_extension(&server_url, auth, strategy),
         AgentChoice::ClaudeCode => {
             let hooks_dir = resolve_hooks_dir(args.hooks_dir.as_deref(), args.agent)?;
-            render_claude_code(&hooks_dir, &server_url, auth, &config.data_dir)
+            render_claude_code(&hooks_dir, &server_url, auth, &config.data_dir, strategy)
         }
         AgentChoice::Codex => {
             let hooks_dir = resolve_hooks_dir(args.hooks_dir.as_deref(), args.agent)?;
-            render_agent("codex", &hooks_dir, &server_url, auth)
+            render_agent("codex", &hooks_dir, &server_url, auth, strategy)
         }
         AgentChoice::Cursor => {
             let hooks_dir = resolve_hooks_dir(args.hooks_dir.as_deref(), args.agent)?;
-            render_agent("cursor", &hooks_dir, &server_url, auth)
+            render_agent("cursor", &hooks_dir, &server_url, auth, strategy)
         }
         AgentChoice::GeminiCli => {
             let hooks_dir = resolve_hooks_dir(args.hooks_dir.as_deref(), args.agent)?;
-            render_agent("gemini-cli", &hooks_dir, &server_url, auth)
+            render_agent("gemini-cli", &hooks_dir, &server_url, auth, strategy)
         }
         AgentChoice::AntigravityCli => {
             let hooks_dir = resolve_hooks_dir(args.hooks_dir.as_deref(), args.agent)?;
-            render_agent("antigravity-cli", &hooks_dir, &server_url, auth)
+            render_agent("antigravity-cli", &hooks_dir, &server_url, auth, strategy)
         }
         AgentChoice::Grok => {
             let hooks_dir = resolve_hooks_dir(args.hooks_dir.as_deref(), args.agent)?;
-            render_grok(&hooks_dir, &server_url, auth, &config.data_dir)
+            render_grok(&hooks_dir, &server_url, auth, &config.data_dir, strategy)
         }
         AgentChoice::Openclaw => {
-            openclaw_plugin::render(&server_url, auth);
+            openclaw_plugin::render(&server_url, auth, strategy);
             Ok(())
         }
     }
@@ -467,11 +468,13 @@ fn apply_to_claude_code_settings(
     };
     let staged = stage_hook_scripts(hooks_dir, "claude-code")?;
     let command_dir = staged_command_dir(&staged, "claude-code");
+    let strategy = args.project_strategy.baked();
     let payload = build_claude_code_payload_with_data_dir(
         &command_dir,
         server_url,
         auth_token,
         Some(data_dir),
+        strategy,
     );
     let our_hooks = payload
         .get("hooks")
@@ -529,8 +532,14 @@ fn apply_to_grok_settings(
     };
     let staged = stage_hook_scripts(hooks_dir, "grok")?;
     let command_dir = staged_command_dir(&staged, "grok");
-    let payload =
-        build_grok_payload_with_data_dir(&command_dir, server_url, auth_token, Some(data_dir));
+    let strategy = args.project_strategy.baked();
+    let payload = build_grok_payload_with_data_dir(
+        &command_dir,
+        server_url,
+        auth_token,
+        Some(data_dir),
+        strategy,
+    );
     let our_hooks = payload
         .get("hooks")
         .and_then(|v| v.as_object())
@@ -598,7 +607,15 @@ fn apply_to_codex_settings(
     };
     let staged = stage_hook_scripts(hooks_dir, "codex")?;
     let command_dir = staged_command_dir(&staged, "codex");
-    let outcome = merge_codex_hooks(&command_dir, server_url, auth_token, data_dir, &path)?;
+    let strategy = args.project_strategy.baked();
+    let outcome = merge_codex_hooks(
+        &command_dir,
+        server_url,
+        auth_token,
+        data_dir,
+        strategy,
+        &path,
+    )?;
     println!(
         "✓ {} {} ({})",
         outcome.verb(),
@@ -628,6 +645,7 @@ fn merge_codex_hooks(
     server_url: &str,
     auth_token: Option<&str>,
     data_dir: &Path,
+    project_strategy: Option<&str>,
     config_path: &Path,
 ) -> Result<ApplyOutcome> {
     // Build the Codex-flavoured payload. The JSON shape is identical
@@ -640,6 +658,7 @@ fn merge_codex_hooks(
         auth_token,
         "codex",
         Some(data_dir),
+        project_strategy,
     );
     let our_hooks = payload
         .get("hooks")
@@ -699,7 +718,15 @@ fn apply_to_cursor_settings(
     };
     let staged = stage_hook_scripts(hooks_dir, "cursor")?;
     let command_dir = staged_command_dir(&staged, "cursor");
-    let outcome = merge_cursor_hooks(&command_dir, server_url, auth_token, data_dir, &path)?;
+    let strategy = args.project_strategy.baked();
+    let outcome = merge_cursor_hooks(
+        &command_dir,
+        server_url,
+        auth_token,
+        data_dir,
+        strategy,
+        &path,
+    )?;
     println!(
         "✓ {} {} ({})",
         outcome.verb(),
@@ -718,6 +745,7 @@ fn merge_cursor_hooks(
     server_url: &str,
     auth_token: Option<&str>,
     data_dir: &Path,
+    project_strategy: Option<&str>,
     config_path: &Path,
 ) -> Result<ApplyOutcome> {
     let payload = build_profile_payload_for_agent(
@@ -727,6 +755,7 @@ fn merge_cursor_hooks(
         auth_token,
         "cursor",
         Some(data_dir),
+        project_strategy,
     );
     let our_hooks = payload
         .get("hooks")
@@ -781,7 +810,15 @@ fn apply_to_gemini_settings(
     };
     let staged = stage_hook_scripts(hooks_dir, "gemini-cli")?;
     let command_dir = staged_command_dir(&staged, "gemini-cli");
-    let outcome = merge_gemini_hooks(&command_dir, server_url, auth_token, data_dir, &path)?;
+    let strategy = args.project_strategy.baked();
+    let outcome = merge_gemini_hooks(
+        &command_dir,
+        server_url,
+        auth_token,
+        data_dir,
+        strategy,
+        &path,
+    )?;
     println!(
         "✓ {} {} ({})",
         outcome.verb(),
@@ -800,6 +837,7 @@ fn merge_gemini_hooks(
     server_url: &str,
     auth_token: Option<&str>,
     data_dir: &Path,
+    project_strategy: Option<&str>,
     config_path: &Path,
 ) -> Result<ApplyOutcome> {
     let payload = build_profile_payload_for_agent(
@@ -809,6 +847,7 @@ fn merge_gemini_hooks(
         auth_token,
         "gemini-cli",
         Some(data_dir),
+        project_strategy,
     );
     let our_hooks = payload
         .get("hooks")
@@ -855,7 +894,15 @@ fn apply_to_antigravity_settings(
     };
     let staged = stage_hook_scripts(hooks_dir, "antigravity-cli")?;
     let command_dir = staged_command_dir(&staged, "antigravity-cli");
-    let outcome = merge_antigravity_hooks(&command_dir, server_url, auth_token, data_dir, &path)?;
+    let strategy = args.project_strategy.baked();
+    let outcome = merge_antigravity_hooks(
+        &command_dir,
+        server_url,
+        auth_token,
+        data_dir,
+        strategy,
+        &path,
+    )?;
     println!(
         "✓ {} {} ({})",
         outcome.verb(),
@@ -874,10 +921,16 @@ fn merge_antigravity_hooks(
     server_url: &str,
     auth_token: Option<&str>,
     data_dir: &Path,
+    project_strategy: Option<&str>,
     config_path: &Path,
 ) -> Result<ApplyOutcome> {
-    let payload =
-        build_antigravity_payload_with_data_dir(staged, server_url, auth_token, Some(data_dir));
+    let payload = build_antigravity_payload_with_data_dir(
+        staged,
+        server_url,
+        auth_token,
+        Some(data_dir),
+        project_strategy,
+    );
     let our_group = payload
         .get("ai-memory")
         .and_then(|v| v.as_object())
@@ -916,7 +969,8 @@ fn apply_to_opencode_plugin(
         Some(p) => p.clone(),
         None => opencode_plugin_path()?,
     };
-    let body = build_opencode_plugin(server_url, auth_token);
+    let strategy = args.project_strategy.baked();
+    let body = build_opencode_plugin(server_url, auth_token, strategy);
 
     let outcome = apply_atomic(&path, move |_existing| Ok(body.clone()))?;
     println!(
@@ -938,19 +992,94 @@ fn apply_to_opencode_plugin(
     Ok(())
 }
 
-fn render_opencode_plugin(server_url: &str, auth_token: Option<&str>) -> Result<()> {
+fn render_opencode_plugin(
+    server_url: &str,
+    auth_token: Option<&str>,
+    project_strategy: Option<&str>,
+) -> Result<()> {
     println!("// OpenCode plugin — write to ~/.config/opencode/plugins/ai-memory.ts");
     println!("// Or re-run with `--apply` to install it automatically.");
     println!("// Restart OpenCode after changing plugins; config is loaded at startup.");
     println!();
-    println!("{}", build_opencode_plugin(server_url, auth_token));
+    println!(
+        "{}",
+        build_opencode_plugin(server_url, auth_token, project_strategy)
+    );
     Ok(())
 }
 
-fn build_opencode_plugin(server_url: &str, auth_token: Option<&str>) -> String {
+/// Emit the `applyMarkerParams` TypeScript function shared verbatim by the
+/// OpenCode plugin and the OMP extension.
+///
+/// `None` reproduces the historical marker-only function byte-for-byte, so
+/// existing generated files and golden tests are unchanged. `Some(default)`
+/// prepends a `DEFAULT_PROJECT_STRATEGY` const and emits a variant that applies
+/// that install-time default when no marker pins a `project_strategy` (#128).
+/// A marker's own `project` / `project_strategy` still take precedence (§3.3),
+/// and repo-root is resolved host-side via `repoRootProject`.
+fn ts_apply_marker_params(default_strategy: Option<&str>) -> String {
+    let Some(default) = default_strategy else {
+        return r#"function applyMarkerParams(url: URL, cwd: string | undefined): void {
+  const marker = findMarker(cwd);
+  if (!marker || !cwd) return;
+  url.searchParams.set("cwd", cwd);
+  try {
+    const body = readFileSync(marker, "utf8");
+    const workspace = tomlKey(body, "workspace");
+    const project = tomlKey(body, "project");
+    const projectStrategy = tomlKey(body, "project_strategy");
+    if (workspace) url.searchParams.set("workspace", workspace);
+    if (project) url.searchParams.set("project", project);
+    if (projectStrategy) url.searchParams.set("project_strategy", projectStrategy);
+    if (!project && (projectStrategy === "repo-root" || projectStrategy === "repo_root")) {
+      const repoProject = repoRootProject(cwd);
+      if (repoProject) url.searchParams.set("project", repoProject);
+    }
+  } catch (_e) {
+  }
+}"#
+        .to_string();
+    };
+    let body = r#"function applyMarkerParams(url: URL, cwd: string | undefined): void {
+  if (!cwd) return;
+  url.searchParams.set("cwd", cwd);
+  let workspace: string | undefined;
+  let project: string | undefined;
+  let projectStrategy: string | undefined;
+  const marker = findMarker(cwd);
+  if (marker) {
+    try {
+      const body = readFileSync(marker, "utf8");
+      workspace = tomlKey(body, "workspace");
+      project = tomlKey(body, "project");
+      projectStrategy = tomlKey(body, "project_strategy");
+    } catch (_e) {
+    }
+  }
+  if (!projectStrategy) projectStrategy = DEFAULT_PROJECT_STRATEGY;
+  if (!project && (projectStrategy === "repo-root" || projectStrategy === "repo_root")) {
+    const repoProject = repoRootProject(cwd);
+    if (repoProject) project = repoProject;
+  }
+  if (workspace) url.searchParams.set("workspace", workspace);
+  if (project) url.searchParams.set("project", project);
+  if (projectStrategy) url.searchParams.set("project_strategy", projectStrategy);
+}"#;
+    format!(
+        "const DEFAULT_PROJECT_STRATEGY = {};\n{body}",
+        ts_string_literal(default)
+    )
+}
+
+fn build_opencode_plugin(
+    server_url: &str,
+    auth_token: Option<&str>,
+    project_strategy: Option<&str>,
+) -> String {
     let token_line = auth_token
         .map(|t| format!("const TOKEN: string | null = {};\n", ts_string_literal(t)))
         .unwrap_or_else(|| "const TOKEN: string | null = null;\n".to_string());
+    let apply_marker_params = ts_apply_marker_params(project_strategy);
     format!(
         r#"// Auto-generated by `ai-memory install-hooks --agent opencode --apply`.
 // Edit by re-running the command, not by hand — install-hooks
@@ -1020,25 +1149,7 @@ function repoRootProject(cwd: string | undefined): string | undefined {{
     return undefined;
   }}
 }}
-function applyMarkerParams(url: URL, cwd: string | undefined): void {{
-  const marker = findMarker(cwd);
-  if (!marker || !cwd) return;
-  url.searchParams.set("cwd", cwd);
-  try {{
-    const body = readFileSync(marker, "utf8");
-    const workspace = tomlKey(body, "workspace");
-    const project = tomlKey(body, "project");
-    const projectStrategy = tomlKey(body, "project_strategy");
-    if (workspace) url.searchParams.set("workspace", workspace);
-    if (project) url.searchParams.set("project", project);
-    if (projectStrategy) url.searchParams.set("project_strategy", projectStrategy);
-    if (!project && (projectStrategy === "repo-root" || projectStrategy === "repo_root")) {{
-      const repoProject = repoRootProject(cwd);
-      if (repoProject) url.searchParams.set("project", repoProject);
-    }}
-  }} catch (_e) {{
-  }}
-}}
+{apply_marker_params}
 
 function sessionID(input: unknown): string | undefined {{
   const value = input as any;
@@ -1218,7 +1329,8 @@ fn apply_to_omp_extension(
     args: &InstallHooksArgs,
 ) -> Result<()> {
     let path = resolve_omp_extension_path(args)?;
-    let body = build_omp_extension(server_url, auth_token);
+    let strategy = args.project_strategy.baked();
+    let body = build_omp_extension(server_url, auth_token, strategy);
 
     let outcome = apply_atomic(&path, move |_existing| Ok(body.clone()))?;
     println!(
@@ -1242,12 +1354,19 @@ fn apply_to_omp_extension(
     Ok(())
 }
 
-fn render_omp_extension(server_url: &str, auth_token: Option<&str>) -> Result<()> {
+fn render_omp_extension(
+    server_url: &str,
+    auth_token: Option<&str>,
+    project_strategy: Option<&str>,
+) -> Result<()> {
     println!("// Oh My Pi / OMP extension — write to ~/.omp/agent/extensions/ai-memory.ts");
     println!("// Or re-run with `--apply` to install it automatically.");
     println!("// Restart OMP after changing extensions; config is loaded at startup.");
     println!();
-    println!("{}", build_omp_extension(server_url, auth_token));
+    println!(
+        "{}",
+        build_omp_extension(server_url, auth_token, project_strategy)
+    );
     Ok(())
 }
 
@@ -1258,10 +1377,15 @@ fn resolve_omp_extension_path(args: &InstallHooksArgs) -> Result<PathBuf> {
     omp_extension_path()
 }
 
-fn build_omp_extension(server_url: &str, auth_token: Option<&str>) -> String {
+fn build_omp_extension(
+    server_url: &str,
+    auth_token: Option<&str>,
+    project_strategy: Option<&str>,
+) -> String {
     let token_line = auth_token
         .map(|t| format!("const TOKEN: string | null = {};\n", ts_string_literal(t)))
         .unwrap_or_else(|| "const TOKEN: string | null = null;\n".to_string());
+    let apply_marker_params = ts_apply_marker_params(project_strategy);
     format!(
         r#"// Auto-generated by `ai-memory install-hooks --agent omp --apply`.
 // Edit by re-running the command, not by hand — install-hooks
@@ -1330,25 +1454,7 @@ function repoRootProject(cwd: string | undefined): string | undefined {{
     return undefined;
   }}
 }}
-function applyMarkerParams(url: URL, cwd: string | undefined): void {{
-  const marker = findMarker(cwd);
-  if (!marker || !cwd) return;
-  url.searchParams.set("cwd", cwd);
-  try {{
-    const body = readFileSync(marker, "utf8");
-    const workspace = tomlKey(body, "workspace");
-    const project = tomlKey(body, "project");
-    const projectStrategy = tomlKey(body, "project_strategy");
-    if (workspace) url.searchParams.set("workspace", workspace);
-    if (project) url.searchParams.set("project", project);
-    if (projectStrategy) url.searchParams.set("project_strategy", projectStrategy);
-    if (!project && (projectStrategy === "repo-root" || projectStrategy === "repo_root")) {{
-      const repoProject = repoRootProject(cwd);
-      if (repoProject) url.searchParams.set("project", repoProject);
-    }}
-  }} catch (_e) {{
-  }}
-}}
+{apply_marker_params}
 
 function sessionID(ctx: any): string | undefined {{
   const id = ctx?.sessionManager?.getSessionId?.();
@@ -1528,29 +1634,59 @@ fn render_agent(
     hooks_dir: &Path,
     server_url: &str,
     auth_token: Option<&str>,
+    project_strategy: Option<&str>,
 ) -> Result<()> {
-    println!("# {label} hook scripts (manual install — wire each to the matching event)");
-    println!("# Hook scripts: {}", hooks_dir.display());
-    println!("# AI-memory server URL: {server_url}");
+    print!(
+        "{}",
+        render_agent_output(label, hooks_dir, server_url, auth_token, project_strategy)?
+    );
+    Ok(())
+}
+
+fn render_agent_output(
+    label: &str,
+    hooks_dir: &Path,
+    server_url: &str,
+    auth_token: Option<&str>,
+    project_strategy: Option<&str>,
+) -> Result<String> {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "# {label} hook scripts (manual install — wire each to the matching event)\n"
+    ));
+    out.push_str(&format!("# Hook scripts: {}\n", hooks_dir.display()));
+    out.push_str(&format!("# AI-memory server URL: {server_url}\n"));
     if auth_token.is_some() {
-        println!("# Auth: set AI_MEMORY_AUTH_TOKEN in each hook's environment to the");
-        println!("#       value passed via --auth-token (omitted from this printout).");
+        out.push_str("# Auth: set AI_MEMORY_AUTH_TOKEN in each hook's environment to the\n");
+        out.push_str("#       value passed via --auth-token (omitted from this printout).\n");
     } else {
-        println!("# Auth: server requires no bearer token. To require one, generate a");
-        println!("#       token with `ai-memory generate-auth-token` and pass it via");
-        println!("#       --auth-token here AND set AI_MEMORY_AUTH_TOKEN on the server.");
+        out.push_str("# Auth: server requires no bearer token. To require one, generate a\n");
+        out.push_str("#       token with `ai-memory generate-auth-token` and pass it via\n");
+        out.push_str("#       --auth-token here AND set AI_MEMORY_AUTH_TOKEN on the server.\n");
     }
-    println!();
+    out.push('\n');
     for entry in std::fs::read_dir(hooks_dir)? {
         let entry = entry?;
         let p = entry.path();
         if p.is_file() && p.extension().is_some_and(|e| e == hook_script_extension()) {
-            println!("- {}", p.display());
+            out.push_str(&format!("- {}\n", p.display()));
         }
     }
-    println!();
-    println!("Set AI_MEMORY_HOOK_URL in each hook's environment to override the default.");
-    Ok(())
+    out.push('\n');
+    out.push_str("Set AI_MEMORY_HOOK_URL in each hook's environment to override the default.\n");
+    if let Some(instruction) = manual_agent_project_strategy_instruction(project_strategy) {
+        out.push_str(&instruction);
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+fn manual_agent_project_strategy_instruction(project_strategy: Option<&str>) -> Option<String> {
+    project_strategy.map(|strategy| {
+        format!(
+            "Set AI_MEMORY_PROJECT_STRATEGY={strategy} in each hook's environment to use the requested project strategy."
+        )
+    })
 }
 
 /// Copy the bundled hook scripts to a stable user-global location
@@ -1846,6 +1982,7 @@ fn render_claude_code(
     server_url: &str,
     auth_token: Option<&str>,
     data_dir: &Path,
+    project_strategy: Option<&str>,
 ) -> Result<()> {
     // Soft check: warn (don't bail) if a script is missing. The user
     // may be running this command inside docker against a host path
@@ -1864,8 +2001,13 @@ fn render_claude_code(
             );
         }
     }
-    let payload =
-        build_claude_code_payload_with_data_dir(hooks_dir, server_url, auth_token, Some(data_dir));
+    let payload = build_claude_code_payload_with_data_dir(
+        hooks_dir,
+        server_url,
+        auth_token,
+        Some(data_dir),
+        project_strategy,
+    );
     let serialized =
         serde_json::to_string_pretty(&payload).context("serializing claude code hook config")?;
     println!("# Claude Code hook config — merge into ~/.claude/settings.json");
@@ -1885,6 +2027,7 @@ fn render_grok(
     server_url: &str,
     auth_token: Option<&str>,
     data_dir: &Path,
+    project_strategy: Option<&str>,
 ) -> Result<()> {
     // Soft check (same rationale as render_claude_code): warn, don't bail,
     // so the docker host-path flow still works.
@@ -1901,8 +2044,13 @@ fn render_grok(
             );
         }
     }
-    let payload =
-        build_grok_payload_with_data_dir(hooks_dir, server_url, auth_token, Some(data_dir));
+    let payload = build_grok_payload_with_data_dir(
+        hooks_dir,
+        server_url,
+        auth_token,
+        Some(data_dir),
+        project_strategy,
+    );
     let serialized =
         serde_json::to_string_pretty(&payload).context("serializing grok hook config")?;
     println!("# Grok Build CLI hook config — write to ~/.grok/hooks/ai-memory.json");
@@ -1923,6 +2071,7 @@ fn render_grok(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::ProjectStrategyArg;
     use std::collections::BTreeMap;
     use std::fs;
     #[cfg(unix)]
@@ -2034,6 +2183,7 @@ mod tests {
             as_user: None,
             apply: true,
             config_file: None,
+            project_strategy: ProjectStrategyArg::Basename,
         }
     }
 
@@ -2076,6 +2226,36 @@ mod tests {
     #[test]
     fn validate_as_user_passes_with_both_flags() {
         assert!(validate_as_user(Some("alice"), Some("some-token")).is_ok());
+    }
+
+    #[test]
+    fn manual_agent_render_mentions_repo_root_project_strategy() {
+        let temp = TempDir::new().unwrap();
+        stub_scripts(temp.path(), &["session-start.sh"]);
+        for agent in ["codex", "cursor", "gemini-cli", "antigravity-cli"] {
+            let output = render_agent_output(
+                agent,
+                temp.path(),
+                "http://127.0.0.1:49374",
+                None,
+                Some("repo-root"),
+            )
+            .unwrap_or_else(|err| panic!("failed to render {agent}: {err}"));
+            assert!(
+                output.contains("AI_MEMORY_PROJECT_STRATEGY=repo-root"),
+                "{agent} manual output must tell users to set the strategy env: {output}"
+            );
+        }
+    }
+
+    #[test]
+    fn manual_agent_render_omits_project_strategy_by_default() {
+        let temp = TempDir::new().unwrap();
+        stub_scripts(temp.path(), &["session-start.sh"]);
+        let output =
+            render_agent_output("codex", temp.path(), "http://127.0.0.1:49374", None, None)
+                .unwrap();
+        assert!(!output.contains("AI_MEMORY_PROJECT_STRATEGY"));
     }
 
     #[test]
@@ -2571,7 +2751,7 @@ model = "gpt-5"
 
     #[test]
     fn opencode_plugin_uses_real_plugin_hooks() {
-        let plugin = build_opencode_plugin("http://127.0.0.1:49374", Some("tok"));
+        let plugin = build_opencode_plugin("http://127.0.0.1:49374", Some("tok"), None);
 
         assert!(plugin.contains("event: async (input)"));
         assert!(plugin.contains(r#""chat.message": async"#));
@@ -2613,7 +2793,7 @@ model = "gpt-5"
 
     #[test]
     fn opencode_plugin_normalizes_payloads_without_legacy_wrapper() {
-        let plugin = build_opencode_plugin("http://127.0.0.1:49374/", None);
+        let plugin = build_opencode_plugin("http://127.0.0.1:49374/", None, None);
 
         assert!(plugin.contains("const SERVER = \"http://127.0.0.1:49374/\".replace"));
         assert!(plugin.contains("const TOKEN: string | null = null;"));
@@ -2628,13 +2808,40 @@ model = "gpt-5"
         );
     }
 
+    #[test]
+    fn opencode_plugin_bakes_repo_root_default() {
+        let plugin =
+            build_opencode_plugin("http://127.0.0.1:49374", Some("tok"), Some("repo-root"));
+        assert!(
+            plugin.contains("const DEFAULT_PROJECT_STRATEGY = \"repo-root\";"),
+            "repo-root install default must bake the const: {plugin}"
+        );
+        assert!(
+            plugin.contains("if (!projectStrategy) projectStrategy = DEFAULT_PROJECT_STRATEGY;"),
+            "must apply the default when a marker pins no strategy: {plugin}"
+        );
+        assert!(
+            plugin.contains("if (repoProject) project = repoProject;"),
+            "{plugin}"
+        );
+    }
+
+    #[test]
+    fn opencode_plugin_default_omits_baked_strategy() {
+        let plugin = build_opencode_plugin("http://127.0.0.1:49374", Some("tok"), None);
+        assert!(
+            !plugin.contains("DEFAULT_PROJECT_STRATEGY"),
+            "basename default must bake no strategy: {plugin}"
+        );
+    }
+
     // ----------------------------------------------------------------
     // OMP tests
     // ----------------------------------------------------------------
 
     #[test]
     fn omp_extension_uses_native_lifecycle_events() {
-        let extension = build_omp_extension("http://127.0.0.1:49374", Some("tok"));
+        let extension = build_omp_extension("http://127.0.0.1:49374", Some("tok"), None);
 
         assert!(extension.contains("export default function AiMemoryExtension"));
         assert!(extension.contains("const AGENT = \"omp\";"));
@@ -2671,6 +2878,29 @@ model = "gpt-5"
     }
 
     #[test]
+    fn omp_extension_bakes_repo_root_default() {
+        let extension =
+            build_omp_extension("http://127.0.0.1:49374", Some("tok"), Some("repo-root"));
+        assert!(
+            extension.contains("const DEFAULT_PROJECT_STRATEGY = \"repo-root\";"),
+            "repo-root install default must bake the const: {extension}"
+        );
+        assert!(
+            extension.contains("if (!projectStrategy) projectStrategy = DEFAULT_PROJECT_STRATEGY;"),
+            "{extension}"
+        );
+    }
+
+    #[test]
+    fn omp_extension_default_omits_baked_strategy() {
+        let extension = build_omp_extension("http://127.0.0.1:49374", Some("tok"), None);
+        assert!(
+            !extension.contains("DEFAULT_PROJECT_STRATEGY"),
+            "{extension}"
+        );
+    }
+
+    #[test]
     fn omp_extension_is_directly_discoverable_by_omp() {
         let tmp = TempDir::new().unwrap();
         let args = InstallHooksArgs {
@@ -2681,6 +2911,7 @@ model = "gpt-5"
             as_user: None,
             apply: true,
             config_file: Some(tmp.path().join("extensions").join("ai-memory.ts")),
+            project_strategy: ProjectStrategyArg::Basename,
         };
 
         let path = resolve_omp_extension_path(&args).unwrap();
@@ -2769,6 +3000,7 @@ model = "gpt-5"
             "http://127.0.0.1:49374",
             None,
             config_tmp.path(),
+            None,
             &config_path,
         )
         .unwrap();
@@ -2816,6 +3048,7 @@ model = "gpt-5"
             "http://127.0.0.1:49374",
             None,
             config_tmp.path(),
+            None,
             &config_path,
         )
         .unwrap();
@@ -2830,6 +3063,7 @@ model = "gpt-5"
             "http://127.0.0.1:49374",
             None,
             config_tmp.path(),
+            None,
             &config_path,
         )
         .unwrap();
@@ -2865,6 +3099,7 @@ model = "gpt-5"
             "http://127.0.0.1:49374",
             None,
             config_tmp.path(),
+            None,
             &config_path,
         )
         .unwrap();
@@ -2910,6 +3145,7 @@ model = "gpt-5"
             "http://127.0.0.1:49374",
             None,
             config_tmp.path(),
+            None,
             &config_path,
         )
         .unwrap();
@@ -2954,6 +3190,7 @@ model = "gpt-5"
             "http://127.0.0.1:49374",
             None,
             config_tmp.path(),
+            None,
             &config_path,
         )
         .unwrap();
@@ -3012,6 +3249,7 @@ model = "gpt-5"
             "http://127.0.0.1:49374",
             None,
             config_tmp.path(),
+            None,
             &config_path,
         )
         .unwrap();
@@ -3063,6 +3301,7 @@ model = "gpt-5"
             "http://127.0.0.1:49374",
             None,
             config_tmp.path(),
+            None,
             &config_path,
         )
         .unwrap();
@@ -3077,6 +3316,7 @@ model = "gpt-5"
             "http://127.0.0.1:49374",
             None,
             config_tmp.path(),
+            None,
             &config_path,
         )
         .unwrap();

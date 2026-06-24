@@ -114,6 +114,25 @@ pointed at the same server instead of falling back to loopback.
 `init`, `serve`, and `generate-auth-token` do not need these env vars because
 they either create local files or start the server itself.
 
+### Default project resolution (`--project-strategy`)
+
+By default each session files memory under `basename(cwd)`. Because an agent
+shell keeps its working directory between tool calls, a single
+`mkdir sub && cd sub` reparents the rest of the session into a phantom project
+named `sub`. To make every session for an install resolve its project from the
+git repo root instead — collapsing subdirectories and worktrees — bake the
+strategy into the hooks:
+
+```bash
+ai-memory install-hooks --apply --agent claude-code --project-strategy repo-root
+```
+
+`--project-strategy` accepts `basename` (the default; bakes nothing, so existing
+installs are unchanged) or `repo-root`. It works for every agent and delivery
+path. A per-repo `.ai-memory.toml` marker's own `project_strategy` / `project`
+still take precedence — see
+[the marker-file reference](marker-file.md#install-wide-default-no-marker).
+
 ---
 
 ## Arch Linux native packages (AUR)

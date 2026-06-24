@@ -150,15 +150,43 @@ ai-memory rename-project \
     --new-workspace movvia
 ```
 
+## Install-wide default (no marker)
+
+`project_strategy = "repo-root"` normally lives in a marker, which means
+dropping a `.ai-memory.toml` in (or above) every repo. To get the same
+repo-root resolution for a whole install **without** a per-repo marker, bake
+it into the generated hooks at install time:
+
+```sh
+ai-memory install-hooks --apply --agent claude-code --project-strategy repo-root
+```
+
+Every session for that install then resolves its project from the main git
+repo root — so an agent that runs `mkdir sub && cd sub` and stays there no
+longer forks the rest of the session into a phantom project named `sub`.
+
+This is **install-time config**, written into the agent's hook command (and
+the generated OpenCode / OMP / OpenClaw plugins) — the same status as the
+`AI_MEMORY_AUTH_TOKEN` / `AI_MEMORY_HOOK_URL` it sits beside, *not* a user-set
+runtime override (which was deliberately rejected in #16). The flag accepts
+`basename` (the default — bakes nothing, behavior unchanged) or `repo-root`.
+
+Precedence is unchanged: a marker's explicit `project_strategy` or `project`
+still wins over the install default.
+
 ## What the marker file does NOT do
 
 - ❌ No glob patterns. Walk-up by literal ancestry only.
 - ❌ No merge of ancestor markers. Closest wins.
 - ❌ No automatic migration of `default`-workspace projects.
 - ❌ No automatic repo-root collapsing. Worktrees and subdirectories only
-  share a project when `project_strategy = "repo-root"` is explicitly set.
-- ❌ No env / auth / hook-url override. Use the existing env vars
-  (`AI_MEMORY_AUTH_TOKEN`, `AI_MEMORY_HOOK_URL`) for those.
+  share a project when `project_strategy = "repo-root"` is explicitly set
+  (per marker, or baked install-wide — see above).
+- ❌ No user-set env / auth / hook-url override. Use the existing env vars
+  (`AI_MEMORY_AUTH_TOKEN`, `AI_MEMORY_HOOK_URL`) for those. (A repo-root
+  *default* can still be baked into an install without a marker via
+  `install-hooks --project-strategy repo-root`, but that is install-time
+  config, not a runtime override the user sets in their shell.)
 
 ## Troubleshooting
 
