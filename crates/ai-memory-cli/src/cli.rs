@@ -441,6 +441,21 @@ pub struct InstallInstructionsArgs {
     /// the file.
     #[arg(long)]
     pub print: bool,
+    /// Skip installing/updating the managed ai-memory Agent Skills.
+    #[arg(long)]
+    pub no_skills: bool,
+    /// Scope for managed ai-memory skill installation.
+    #[arg(long = "skills-scope", value_enum)]
+    pub skills_scope: Option<InstallSkillsScope>,
+    /// Agent skill directory family for managed ai-memory skill installation.
+    #[arg(long = "skills-agent", value_enum)]
+    pub skills_agent: Option<InstallSkillsAgent>,
+    /// Override the managed skill root directory.
+    #[arg(long = "skills-target-dir")]
+    pub skills_target_dir: Option<PathBuf>,
+    /// Overwrite same-named unmanaged skills while installing from `install-instructions`.
+    #[arg(long = "skills-force")]
+    pub skills_force: bool,
 }
 
 /// Skill install scope for `install-skills`.

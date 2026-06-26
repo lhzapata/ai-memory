@@ -13,10 +13,15 @@
 //! file. Idempotent via HTML-comment markers so re-running picks up
 //! whatever the snippet evolves into without duplicating the block.
 
+use std::path::PathBuf;
+
 use anyhow::{Context, Result};
 
-use crate::cli::InstallInstructionsArgs;
+use crate::cli::{
+    InstallInstructionsArgs, InstallSkillsAgent, InstallSkillsArgs, InstallSkillsScope,
+};
 use crate::commands::apply_shared::{ApplyOutcome, apply_atomic};
+use crate::commands::install_skills;
 use crate::config::Config;
 
 // Markers + the snippet body live in `ai_memory_core::routing_snippet`
@@ -29,7 +34,7 @@ use ai_memory_core::{MARKER_END, MARKER_START, full_block};
 /// # Errors
 /// Returns an error if the target path can't be written or if the
 /// existing file isn't valid UTF-8.
-pub fn run(_config: &Config, args: InstallInstructionsArgs) -> Result<()> {
+pub fn run(config: &Config, args: InstallInstructionsArgs) -> Result<()> {
     let block = full_block();
     let targets = resolve_targets(args.target.as_ref())?;
 
@@ -38,24 +43,28 @@ pub fn run(_config: &Config, args: InstallInstructionsArgs) -> Result<()> {
             println!("# Would write into: {}\n", t.display());
             println!("{block}");
         }
-        return Ok(());
+    } else {
+        for target in &targets {
+            let outcome = apply_atomic(target, |existing| {
+                Ok(merge_instructions_block(existing, &block))
+            })?;
+            println!(
+                "✓ {} {} ({})",
+                outcome.verb(),
+                target.display(),
+                match outcome {
+                    ApplyOutcome::Created => "new file",
+                    ApplyOutcome::Updated => "backup written next to it",
+                    ApplyOutcome::NoOp => "already up to date",
+                }
+            );
+        }
     }
 
-    for target in &targets {
-        let outcome = apply_atomic(target, |existing| {
-            Ok(merge_instructions_block(existing, &block))
-        })?;
-        println!(
-            "✓ {} {} ({})",
-            outcome.verb(),
-            target.display(),
-            match outcome {
-                ApplyOutcome::Created => "new file",
-                ApplyOutcome::Updated => "backup written next to it",
-                ApplyOutcome::NoOp => "already up to date",
-            }
-        );
+    if !args.no_skills {
+        install_skills::run(config, skill_args_from_instruction_args(&args, &targets))?;
     }
+
     Ok(())
 }
 
@@ -97,6 +106,40 @@ fn resolve_targets(explicit: Option<&std::path::PathBuf>) -> Result<Vec<std::pat
             );
             Ok(vec![claude_md])
         }
+    }
+}
+
+fn skill_args_from_instruction_args(
+    args: &InstallInstructionsArgs,
+    targets: &[PathBuf],
+) -> InstallSkillsArgs {
+    InstallSkillsArgs {
+        scope: args.skills_scope.unwrap_or(InstallSkillsScope::Project),
+        agent: args
+            .skills_agent
+            .unwrap_or_else(|| infer_skills_agent_from_instruction_targets(targets)),
+        target_dir: args.skills_target_dir.clone(),
+        print: args.print,
+        force: args.skills_force,
+    }
+}
+
+fn infer_skills_agent_from_instruction_targets(targets: &[PathBuf]) -> InstallSkillsAgent {
+    let mut has_claude_target = false;
+    let mut has_agents_target = false;
+
+    for target in targets {
+        match target.file_name().and_then(|name| name.to_str()) {
+            Some("CLAUDE.md") => has_claude_target = true,
+            Some("AGENTS.md") => has_agents_target = true,
+            _ => {}
+        }
+    }
+
+    match (has_claude_target, has_agents_target) {
+        (true, true) => InstallSkillsAgent::Both,
+        (false, true) => InstallSkillsAgent::Agents,
+        _ => InstallSkillsAgent::ClaudeCode,
     }
 }
 
