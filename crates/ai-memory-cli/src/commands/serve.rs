@@ -286,6 +286,9 @@ pub async fn run(config: &Config, args: ServeArgs) -> Result<()> {
                     DEFAULT_HOOK_INGEST_MAX_IN_FLIGHT,
                 )),
                 consolidate_on_session_end: config.consolidate_on_session_end,
+                subagent_sessions: std::sync::Arc::new(tokio::sync::Mutex::new(
+                    ai_memory_hooks::SubagentSessionSet::default(),
+                )),
                 home_dir: config.home_dir.clone(),
             });
             let admin = admin_router(AdminState {

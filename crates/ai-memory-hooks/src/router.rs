@@ -8,7 +8,7 @@
 //! basic-memory #763). The agent never blocks on us thanks to the
 //! fire-and-forget client side.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -31,7 +31,9 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::log;
-use crate::payload::{HookEnvelope, HookEvent, HookQuery, ProjectStrategy, parse_agent};
+use crate::payload::{
+    HookEnvelope, HookEvent, HookQuery, ProjectStrategy, body_is_subagent, parse_agent,
+};
 use crate::synth::synthesize_session_page;
 
 /// Default maximum number of hook events allowed to be processing at once.
@@ -49,6 +51,11 @@ pub const MAX_HOOK_BATCH_ITEMS: usize = 256;
 /// Maximum cwd-resolution cache entries kept per server process. The cache is
 /// an optimization only; evicted entries are re-resolved through the writer.
 pub const DEFAULT_PROJECT_CACHE_MAX_ENTRIES: usize = 4096;
+
+/// Cap on session ids tracked as subagents for the `drop_subagent_captures`
+/// tail-drop. Bounded LRU: a missed `SubagentStop` can never grow it without
+/// bound — the oldest id evicts once the cap is hit.
+const SUBAGENT_SESSIONS_MAX: usize = 4096;
 
 /// Resolved-project cache key:
 /// `(cwd, workspace_override, project_override, project_strategy)`.
@@ -141,6 +148,62 @@ impl ProjectCacheStore {
     }
 }
 
+/// Shared bounded set of session ids known to belong to a SUBAGENT.
+pub type SubagentSessions = Arc<tokio::sync::Mutex<SubagentSessionSet>>;
+
+/// Tracks the session ids of subagent (nested/spawned) sessions so that the
+/// `drop_subagent_captures` gate can also drop the **unmarked tail** of those
+/// sessions (`user_prompt_submit` / `stop` / `session_end`), which the
+/// per-event marker (`subagentType` / `agent_type`) does not cover. A session
+/// is seeded when a `SubagentStart` or any marker-bearing event arrives, and
+/// forgotten on `SubagentStop`. Bounded LRU so a missed stop cannot leak memory.
+#[derive(Debug)]
+pub struct SubagentSessionSet {
+    ids: HashSet<SessionId>,
+    order: VecDeque<SessionId>,
+    max: usize,
+}
+
+impl Default for SubagentSessionSet {
+    fn default() -> Self {
+        Self {
+            ids: HashSet::new(),
+            order: VecDeque::new(),
+            max: SUBAGENT_SESSIONS_MAX,
+        }
+    }
+}
+
+impl SubagentSessionSet {
+    /// Mark a session id as a subagent (idempotent). Evicts the oldest id once
+    /// the cap is exceeded.
+    fn insert(&mut self, id: SessionId) {
+        if self.ids.insert(id) {
+            self.order.push_back(id);
+            while self.ids.len() > self.max {
+                if let Some(oldest) = self.order.pop_front() {
+                    self.ids.remove(&oldest);
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Whether this session id is a known subagent.
+    #[must_use]
+    fn contains(&self, id: &SessionId) -> bool {
+        self.ids.contains(id)
+    }
+
+    /// Forget a session id (on `SubagentStop`).
+    fn remove(&mut self, id: &SessionId) {
+        if self.ids.remove(id) {
+            self.order.retain(|k| k != id);
+        }
+    }
+}
+
 /// Shared state passed to the hook handler.
 #[derive(Clone)]
 pub struct HookState {
@@ -183,6 +246,13 @@ pub struct HookState {
     /// session close stays cheap; the LLM checkpoint otherwise happens on
     /// PreCompact and via manual `memory_consolidate`.
     pub consolidate_on_session_end: bool,
+    /// Session ids known to be subagents (seeded by `SubagentStart` / any
+    /// marker-bearing event). For a project that opted into
+    /// `drop_subagent_captures` (via its `.ai-memory.toml`, forwarded as the
+    /// per-event `drop_subagent` flag), every event of a tracked session is
+    /// dropped — closing the unmarked tail
+    /// (`user_prompt_submit`/`stop`/`session_end`) the per-event marker misses.
+    pub subagent_sessions: SubagentSessions,
     /// Operator home directory, sourced from `Config` once at startup. The
     /// cwd->project resolver never prefix-matches a stored `repo_path` equal
     /// to this, so `$HOME` cannot become a catch-all (issue #103). `None`
@@ -207,6 +277,13 @@ async fn handle_hook(
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let env = HookEnvelope::from_query_and_body(query, body);
+    // Accept-but-drop subagent captures (incl. the unmarked tail of tracked
+    // subagent sessions) when the operator opts in. Returning 202 (not an error)
+    // means the client treats the event as delivered and never retries/spools
+    // it. Runs before the semaphore so a dropped event consumes no capacity.
+    if should_drop_subagent(&state, &env).await {
+        return (StatusCode::ACCEPTED, "subagent capture dropped");
+    }
     // The auth middleware in front of `/hook` injects the request's
     // [`ActorContext`] (rung 1 root, rung 2 DB user, or anonymous). We
     // capture its `user` field NOW — before the spawn drops the request
@@ -302,6 +379,13 @@ async fn handle_hook_batch(
     for item in items {
         let query = parse_hook_query(&item.url);
         let env = HookEnvelope::from_query_and_body(query, item.body);
+        // Accept-but-drop subagent captures (see `handle_hook`): count the item
+        // as committed so the client clears it from its spool, but do not store
+        // it. Keeps the contiguous-prefix ack contract intact.
+        if should_drop_subagent(&state, &env).await {
+            accepted += 1;
+            continue;
+        }
         if let Err(e) = process(&state, env, actor_user.clone()).await {
             warn!(error = %e, accepted, "hook batch item failed; stopping (fail-fast)");
             break;
@@ -309,6 +393,45 @@ async fn handle_hook_batch(
         accepted += 1;
     }
     (StatusCode::OK, Json(HookBatchAck { accepted }))
+}
+
+/// Decide whether to accept-but-drop this event under `drop_subagent_captures`,
+/// maintaining the subagent-session set. Returns `true` to drop. Seeds the
+/// session on `SubagentStart` and on any marker-bearing event; forgets it on
+/// `SubagentStop`; and drops the **unmarked tail** (`user_prompt_submit` /
+/// `stop` / `session_end`) of a session already known to be a subagent. No-op
+/// (returns `false`) unless this event's project opted in via the per-event
+/// `drop_subagent` flag (sourced from its `.ai-memory.toml`).
+async fn should_drop_subagent(state: &HookState, env: &HookEnvelope) -> bool {
+    if !env.drop_subagent_requested {
+        return false;
+    }
+    let sid = resolve_session_id(env).ok();
+    match env.event {
+        HookEvent::SubagentStop => {
+            if let Some(s) = sid {
+                state.subagent_sessions.lock().await.remove(&s);
+            }
+            true
+        }
+        HookEvent::SubagentStart => {
+            if let Some(s) = sid {
+                state.subagent_sessions.lock().await.insert(s);
+            }
+            true
+        }
+        _ if body_is_subagent(&env.raw) => {
+            if let Some(s) = sid {
+                state.subagent_sessions.lock().await.insert(s);
+            }
+            true
+        }
+        // Unmarked event: drop only when its session is a known subagent (tail).
+        _ => match sid {
+            Some(s) => state.subagent_sessions.lock().await.contains(&s),
+            None => false,
+        },
+    }
 }
 
 /// Parse the `?event=…&agent=…` query of a spooled hook URL into [`HookQuery`],
@@ -1086,7 +1209,10 @@ const fn importance_for(event: HookEvent) -> u8 {
         HookEvent::UserPrompt => 8,
         HookEvent::PostToolUse | HookEvent::PreToolUse => 5,
         HookEvent::Stop | HookEvent::PreCompact => 6,
-        HookEvent::Notification | HookEvent::Other => 3,
+        HookEvent::Notification
+        | HookEvent::Other
+        | HookEvent::SubagentStart
+        | HookEvent::SubagentStop => 3,
     }
 }
 
@@ -1128,6 +1254,7 @@ mod tests {
             project_cache: Arc::new(tokio::sync::Mutex::new(ProjectCacheStore::default())),
             active_project: ActiveProject::new(),
             consolidate_on_session_end: false,
+            subagent_sessions: Arc::new(tokio::sync::Mutex::new(SubagentSessionSet::default())),
             home_dir: None,
             ingest_semaphore: Arc::new(tokio::sync::Semaphore::new(
                 DEFAULT_HOOK_INGEST_MAX_IN_FLIGHT,
@@ -1241,6 +1368,231 @@ mod tests {
             .unwrap();
         let ack: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(ack["accepted"], 2, "both events committed, oldest-first");
+    }
+
+    /// `pre-tool-use` query+agent for building an env to recompute a SessionId.
+    fn grok_tool_query() -> HookQuery {
+        HookQuery {
+            event: "pre-tool-use".into(),
+            agent: Some("grok".into()),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_hook_batch_drops_subagent_events_when_enabled() {
+        let tmp = TempDir::new().unwrap();
+        let state = Arc::new(make_state(&tmp).await);
+
+        // A grok subagent tool-use event (carries `subagentType`) alongside a
+        // top-level event (no marker), in ONE batch.
+        let sub_body = serde_json::json!({
+            "sessionId": "sub-s1", "subagentType": "general-purpose", "toolName": "x"
+        });
+        let top_body = serde_json::json!({ "sessionId": "top-s1", "toolName": "x" });
+        // The project opted in (`.ai-memory.toml` → `drop_subagent=1`), so every
+        // event carries the flag; only the actual subagent capture is dropped.
+        let items = vec![
+            HookBatchItem {
+                url: "http://h/hook?event=pre-tool-use&agent=grok&drop_subagent=1".into(),
+                body: sub_body.clone(),
+            },
+            HookBatchItem {
+                url: "http://h/hook?event=pre-tool-use&agent=grok&drop_subagent=1".into(),
+                body: top_body.clone(),
+            },
+        ];
+
+        let response = handle_hook_batch(State(state.clone()), None, Json(items))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let ack: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        // Accept-but-drop: BOTH are acked so the client clears its spool…
+        assert_eq!(
+            ack["accepted"], 2,
+            "both acked so the client clears its spool"
+        );
+
+        // …but only the top-level event was persisted; the subagent left nothing.
+        let sub_sid = resolve_session_id(&HookEnvelope::from_query_and_body(
+            grok_tool_query(),
+            sub_body,
+        ))
+        .unwrap();
+        let top_sid = resolve_session_id(&HookEnvelope::from_query_and_body(
+            grok_tool_query(),
+            top_body,
+        ))
+        .unwrap();
+        assert!(
+            state
+                .reader
+                .observations_for_session(sub_sid)
+                .await
+                .unwrap()
+                .is_empty(),
+            "subagent capture must not be persisted"
+        );
+        assert_eq!(
+            state
+                .reader
+                .observations_for_session(top_sid)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "top-level capture is persisted as usual"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_hook_batch_keeps_subagent_events_when_disabled() {
+        let tmp = TempDir::new().unwrap();
+        let state = Arc::new(make_state(&tmp).await);
+
+        // No `drop_subagent` flag on the request → the project did not opt in,
+        // so its subagent captures are stored as usual.
+        let sub_body = serde_json::json!({
+            "sessionId": "sub-s2", "subagentType": "general-purpose", "toolName": "x"
+        });
+        let items = vec![HookBatchItem {
+            url: "http://h/hook?event=pre-tool-use&agent=grok".into(),
+            body: sub_body.clone(),
+        }];
+
+        let response = handle_hook_batch(State(state.clone()), None, Json(items))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let sub_sid = resolve_session_id(&HookEnvelope::from_query_and_body(
+            grok_tool_query(),
+            sub_body,
+        ))
+        .unwrap();
+        assert_eq!(
+            state
+                .reader
+                .observations_for_session(sub_sid)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "without the per-project opt-in, subagent captures are stored (default behavior)"
+        );
+    }
+
+    #[tokio::test]
+    async fn drop_subagent_captures_drops_unmarked_tail_of_tracked_session() {
+        let tmp = TempDir::new().unwrap();
+        let state = Arc::new(make_state(&tmp).await);
+
+        // (1) marked subagent event seeds session "sub" (and is dropped);
+        // (2) a later UNMARKED event on "sub" is the tail → dropped via tracking;
+        // (3) an UNMARKED event on a never-seeded session "top" → kept.
+        let marked = serde_json::json!({
+            "sessionId": "sub", "subagentType": "general-purpose", "toolName": "x"
+        });
+        let tail = serde_json::json!({ "sessionId": "sub", "toolName": "y" });
+        let top = serde_json::json!({ "sessionId": "top", "toolName": "z" });
+        let items = vec![
+            HookBatchItem {
+                url: "http://h/hook?event=pre-tool-use&agent=grok&drop_subagent=1".into(),
+                body: marked,
+            },
+            HookBatchItem {
+                url: "http://h/hook?event=pre-tool-use&agent=grok&drop_subagent=1".into(),
+                body: tail.clone(),
+            },
+            HookBatchItem {
+                url: "http://h/hook?event=pre-tool-use&agent=grok&drop_subagent=1".into(),
+                body: top.clone(),
+            },
+        ];
+
+        let response = handle_hook_batch(State(state.clone()), None, Json(items))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let ack: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(ack["accepted"], 3, "all acked: 2 dropped + 1 processed");
+
+        let sub_sid =
+            resolve_session_id(&HookEnvelope::from_query_and_body(grok_tool_query(), tail))
+                .unwrap();
+        let top_sid =
+            resolve_session_id(&HookEnvelope::from_query_and_body(grok_tool_query(), top)).unwrap();
+        assert!(
+            state
+                .reader
+                .observations_for_session(sub_sid)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the unmarked tail of a tracked subagent session is dropped"
+        );
+        assert_eq!(
+            state
+                .reader
+                .observations_for_session(top_sid)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "an unmarked event on a non-subagent session is kept"
+        );
+    }
+
+    #[tokio::test]
+    async fn subagent_start_event_seeds_the_session_so_its_tail_drops() {
+        let tmp = TempDir::new().unwrap();
+        let state = Arc::new(make_state(&tmp).await);
+
+        // SubagentStart seeds session "ss" BEFORE its first content event, so even
+        // the leading unmarked user_prompt_submit is dropped.
+        let start = serde_json::json!({ "sessionId": "ss" });
+        let lead = serde_json::json!({ "sessionId": "ss", "prompt": "go" });
+        let items = vec![
+            HookBatchItem {
+                url: "http://h/hook?event=subagent-start&agent=grok&drop_subagent=1".into(),
+                body: start,
+            },
+            HookBatchItem {
+                url: "http://h/hook?event=user-prompt-submit&agent=grok&drop_subagent=1".into(),
+                body: lead.clone(),
+            },
+        ];
+
+        let response = handle_hook_batch(State(state.clone()), None, Json(items))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let sid = resolve_session_id(&HookEnvelope::from_query_and_body(
+            HookQuery {
+                event: "user-prompt-submit".into(),
+                agent: Some("grok".into()),
+                ..Default::default()
+            },
+            lead,
+        ))
+        .unwrap();
+        assert!(
+            state
+                .reader
+                .observations_for_session(sid)
+                .await
+                .unwrap()
+                .is_empty(),
+            "SubagentStart seeds the session so the leading unmarked event drops too"
+        );
     }
 
     #[tokio::test]

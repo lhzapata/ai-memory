@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Per-project `drop_subagent_captures` opt-in. A project sets
+  `drop_subagent_captures = "true"` in its `.ai-memory.toml`; the host-side hook
+  forwards it (as the `drop_subagent` query flag, alongside the existing
+  `workspace`/`project`/`project_strategy` marker fields) so the ingest router
+  **accepts but does not persist** that project's subagent-session captures,
+  keeping only top-level sessions. A multi-agent harness fans one goal out to
+  many subagent sessions, each firing lifecycle hooks; on a small shared
+  instance that flood can saturate ingest and bloat the store. Scoping the
+  opt-in to the project that asked for it avoids a server-global switch that
+  would shed subagent captures for every project on the instance. Captures are
+  accepted (HTTP 202 / counted in the `/hook/batch` ack) so clients do not retry
+  or spool them, but they are not stored. Detection combines a per-event marker
+  (`subagentType` for grok, `agent_type`/`agent_id` for Claude Code) with
+  stateful, bounded tracking of subagent session ids: the router seeds the set
+  from any marked event and from the newly registered
+  `SubagentStart`/`SubagentStop` lifecycle hooks (claude-code and grok), and
+  clears it on `SubagentStop`, so the unmarked tail of a subagent session (its
+  `user_prompt_submit`/`stop`/`session_end`, which carry no marker) is dropped
+  too — not just the marker-bearing tool-use events.
+
 ## [1.4.1] - 2026-06-28
 
 ## [1.4.0] - 2026-06-26

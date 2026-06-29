@@ -50,11 +50,12 @@ pub fn url_encode(s: &str) -> String {
 /// server cannot see this checkout.
 pub fn marker_query_suffix(cwd: &str, default_strategy: Option<&str>) -> String {
     let mut qs = format!("&cwd={}", url_encode(cwd));
-    let (mut workspace, mut project, mut strategy) = (None, None, None);
+    let (mut workspace, mut project, mut strategy, mut drop_subagent) = (None, None, None, None);
     if let Some(marker) = find_marker(cwd) {
         workspace = parse_toml_key(&marker, "workspace");
         project = parse_toml_key(&marker, "project");
         strategy = parse_toml_key(&marker, "project_strategy");
+        drop_subagent = parse_toml_key(&marker, "drop_subagent_captures");
     }
     if strategy.is_none() {
         strategy = default_strategy.map(str::to_owned);
@@ -70,6 +71,12 @@ pub fn marker_query_suffix(cwd: &str, default_strategy: Option<&str>) -> String 
     }
     if let Some(val) = strategy {
         qs.push_str(&format!("&project_strategy={}", url_encode(&val)));
+    }
+    // Per-project `drop_subagent_captures` opt-in: forward the marker's value as
+    // the `drop_subagent` flag so the server scopes the drop to this project.
+    // The server interprets truthiness (`1`/`true`/…).
+    if let Some(val) = drop_subagent.filter(|v| !v.is_empty()) {
+        qs.push_str(&format!("&drop_subagent={}", url_encode(&val)));
     }
     qs
 }
@@ -427,8 +434,8 @@ project = "infra" # this is fine
     }
 
     /// `marker_query_suffix` appends `&workspace=…&project=…` (and
-    /// `&project_strategy=…`) when the marker declares them. Each value is
-    /// URL-encoded, so a workspace with a space round-trips as `%20`.
+    /// `&project_strategy=…`, `&drop_subagent=…`) when the marker declares them.
+    /// Each value is URL-encoded, so a workspace with a space round-trips as `%20`.
     #[test]
     fn marker_query_suffix_appends_marker_fields() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -439,6 +446,7 @@ project = "infra" # this is fine
 workspace = "acme corp"
 project = "infra"
 project_strategy = "repo-root"
+drop_subagent_captures = "true"
 "#,
         )
         .unwrap();
@@ -449,6 +457,21 @@ project_strategy = "repo-root"
         assert!(qs.contains("&workspace=acme%20corp"), "{qs}");
         assert!(qs.contains("&project=infra"), "{qs}");
         assert!(qs.contains("&project_strategy=repo-root"), "{qs}");
+        assert!(qs.contains("&drop_subagent=true"), "{qs}");
+    }
+
+    /// A marker WITHOUT `drop_subagent_captures` does not forward the flag, so
+    /// the server keeps that project's subagent captures (opt-in only).
+    #[test]
+    fn marker_query_suffix_omits_drop_subagent_when_unset() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            tmp.path().join(".ai-memory.toml"),
+            "workspace = \"acme\"\nproject = \"infra\"\n",
+        )
+        .unwrap();
+        let qs = marker_query_suffix(tmp.path().to_str().unwrap(), None);
+        assert!(!qs.contains("drop_subagent"), "{qs}");
     }
 
     #[test]

@@ -104,11 +104,13 @@ ai_memory_marker_qs() {
     ws=""
     pr=""
     st=""
+    ds=""
     marker=$(ai_memory_find_marker "$cwd")
     if [ -n "$marker" ]; then
         ws=$(ai_memory_parse_toml_key "$marker" workspace)
         pr=$(ai_memory_parse_toml_key "$marker" project)
         st=$(ai_memory_parse_toml_key "$marker" project_strategy)
+        ds=$(ai_memory_parse_toml_key "$marker" drop_subagent_captures)
     fi
     # Install-time default baked into the hook command by
     # `install-hooks --project-strategy` fills the strategy only when no marker
@@ -130,6 +132,9 @@ ai_memory_marker_qs() {
     [ -n "$ws" ] && qs="${qs}&workspace=$(ai_memory_url_encode "$ws")"
     [ -n "$pr" ] && qs="${qs}&project=$(ai_memory_url_encode "$pr")"
     [ -n "$st" ] && qs="${qs}&project_strategy=$(ai_memory_url_encode "$st")"
+    # Per-project drop_subagent_captures opt-in: forward to the server, which
+    # interprets truthiness (1/true/...) and scopes the drop to this project.
+    [ -n "$ds" ] && qs="${qs}&drop_subagent=$(ai_memory_url_encode "$ds")"
     printf '%s' "$qs"
 }
 

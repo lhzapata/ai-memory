@@ -33,7 +33,8 @@ handoff lookups.
 The marker path is shared by the POSIX/PowerShell hook scripts and the
 generated OpenCode / OMP / OpenClaw TypeScript integrations. In all cases,
 hook capture and handoff lookup send the same `cwd`, `workspace`, `project`,
-and `project_strategy` query params to the server when a marker is present;
+`project_strategy`, and `drop_subagent` query params to the server when a
+marker is present;
 handoff lookup also sends `cwd` when no marker exists so the default
 `project = basename(cwd)` route works consistently.
 
@@ -53,6 +54,14 @@ project = "pe-portais"
 # linked worktrees and subdirectories share one project. Ignored when
 # `project` is present.
 project_strategy = "repo-root"
+
+# Optional. Opt this project into drop_subagent_captures: set it to "true"
+# and the server accepts but does NOT store this project's subagent-session
+# captures. A multi-agent harness fans one goal out to many subagent
+# sessions whose per-event captures can flood a small instance; scoping the
+# opt-in here keeps the drop from affecting other projects on the same
+# server. Off by default (absent / "false").
+drop_subagent_captures = "true"
 ```
 
 **Naming rules** for `workspace` and `project`, validated server-side:
@@ -66,6 +75,13 @@ defensively but the server's regex is the source of truth.
 
 `project_strategy` accepts `repo-root` (or `repo_root`) only. Unknown
 values are ignored and behave like the default `basename(cwd)` strategy.
+
+`drop_subagent_captures` accepts a truthy string (`"true"` / `"1"` /
+`"yes"` / `"on"`); any other value, or its absence, leaves this project's
+subagent captures stored as usual. Top-level (non-subagent) sessions are
+always stored regardless. This is per-project on purpose: there is no
+server-global switch, so opting one noisy project in never sheds subagent
+captures for the others on a shared instance.
 
 ## Four canonical examples
 

@@ -71,11 +71,13 @@ function Get-AiMemoryMarkerQuery {
     $ws = $null
     $proj = $null
     $strategy = $null
+    $dropSubagent = $null
     $marker = Get-AiMemoryMarkerToml -Cwd $Cwd
     if ($marker) {
         $ws = Get-AiMemoryTomlKey -File $marker -Key "workspace"
         $proj = Get-AiMemoryTomlKey -File $marker -Key "project"
         $strategy = Get-AiMemoryTomlKey -File $marker -Key "project_strategy"
+        $dropSubagent = Get-AiMemoryTomlKey -File $marker -Key "drop_subagent_captures"
     }
     # Install-time default baked into the hook command by
     # `install-hooks --project-strategy` fills the strategy only when no marker
@@ -91,6 +93,9 @@ function Get-AiMemoryMarkerQuery {
     if ($ws) { $qs += "&workspace=$([uri]::EscapeDataString($ws))" }
     if ($proj) { $qs += "&project=$([uri]::EscapeDataString($proj))" }
     if ($strategy) { $qs += "&project_strategy=$([uri]::EscapeDataString($strategy))" }
+    # Per-project drop_subagent_captures opt-in: forward to the server, which
+    # interprets truthiness (1/true/...) and scopes the drop to this project.
+    if ($dropSubagent) { $qs += "&drop_subagent=$([uri]::EscapeDataString($dropSubagent))" }
     return $qs
 }
 

@@ -34,6 +34,13 @@ pub struct HookQuery {
     /// When omitted and `extension` is present, unknown `event` values
     /// are preserved as the source event.
     pub source_event: Option<String>,
+    /// Per-project opt-in for `drop_subagent_captures`, forwarded by the
+    /// host-side hook from a project's `.ai-memory.toml`. A truthy value
+    /// (`1`/`true`/…) makes the server accept-but-drop this project's subagent
+    /// captures; absent/falsy leaves them stored. Scoping the drop to the
+    /// project that asked for it avoids a server-global switch that would shed
+    /// subagent captures for every project on a shared instance.
+    pub drop_subagent: Option<String>,
 }
 
 /// Coalesced view of an incoming hook event after light parsing of the
@@ -58,6 +65,11 @@ pub struct HookEnvelope {
     pub project_override: Option<String>,
     /// Project derivation strategy declared by the hook marker.
     pub project_strategy: ProjectStrategy,
+    /// Whether this project opted into `drop_subagent_captures` via its
+    /// `.ai-memory.toml` (forwarded as the `drop_subagent` query flag). The
+    /// ingest router consults this per-event so the drop is scoped to the
+    /// project that asked for it.
+    pub drop_subagent_requested: bool,
     /// Optional third-party extension namespace.
     pub extension: Option<String>,
     /// Optional source event name from the extension vocabulary.
@@ -68,6 +80,36 @@ pub struct HookEnvelope {
     pub body_excerpt: Option<String>,
     /// The agent's raw JSON, kept for forensics.
     pub raw: serde_json::Value,
+}
+
+/// Keys by which agent harnesses tag a hook event as belonging to a SUBAGENT
+/// (a nested/spawned agent session) rather than the top-level session. Grok
+/// sets `subagentType` (on its tool-use events); Claude Code sets `agent_type`
+/// and `agent_id` (on its `SubagentStart`/`SubagentStop` and subagent tool
+/// events). The set is a union so one check covers every harness that signals
+/// subagent-ness; a harness that does not signal it simply never matches.
+const SUBAGENT_MARKER_KEYS: &[&str] = &["subagentType", "agent_type", "agent_id"];
+
+/// True when the raw hook payload carries a non-empty subagent marker — i.e.
+/// the event originates from a spawned subagent session. The ingest router
+/// consults this to optionally drop subagent captures (the
+/// `drop_subagent_captures` setting). Only top-level string keys are inspected.
+pub(crate) fn body_is_subagent(raw: &serde_json::Value) -> bool {
+    SUBAGENT_MARKER_KEYS.iter().any(|key| {
+        raw.get(*key)
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
+    })
+}
+
+/// Truthy interpretation of a query-string flag (`1`/`true`/`yes`/`on`,
+/// case-insensitive). Used for the per-project `drop_subagent` opt-in the
+/// host-side hook forwards from a project's `.ai-memory.toml`.
+fn query_flag_truthy(value: Option<&str>) -> bool {
+    matches!(
+        value.map(|v| v.trim().to_ascii_lowercase()).as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
 }
 
 /// How the hook router derives a project name when no explicit
@@ -123,6 +165,10 @@ pub enum HookEvent {
     Stop,
     /// Session ended (final).
     SessionEnd,
+    /// A subagent (nested/spawned child session) started.
+    SubagentStart,
+    /// A subagent finished.
+    SubagentStop,
     /// Anything else.
     Other,
 }
@@ -148,6 +194,11 @@ impl HookEvent {
             "notification" | "Notification" => Self::Notification,
             "stop" | "Stop" => Self::Stop,
             "session-end" | "session_end" | "SessionEnd" | "sessionEnd" => Self::SessionEnd,
+            "subagent-start" | "subagent_start" | "SubagentStart" | "subagentStart" => {
+                Self::SubagentStart
+            }
+            "subagent-stop" | "subagent_stop" | "SubagentStop" | "subagentStop"
+            | "subagent-end" | "SubagentEnd" => Self::SubagentStop,
             _ => Self::Other,
         }
     }
@@ -164,6 +215,9 @@ impl HookEvent {
             Self::Notification => ObservationKind::Notification,
             Self::Stop => ObservationKind::Stop,
             Self::SessionEnd => ObservationKind::SessionEnd,
+            // Subagent lifecycle events are normally dropped (drop_subagent_captures);
+            // bucket as Other for the flag-off path rather than growing ObservationKind.
+            Self::SubagentStart | Self::SubagentStop => ObservationKind::Other,
             Self::Other => ObservationKind::Other,
         }
     }
@@ -238,6 +292,7 @@ impl HookEnvelope {
         let workspace_override = query.workspace.filter(|s| !s.is_empty());
         let project_override = query.project.filter(|s| !s.is_empty());
         let project_strategy = ProjectStrategy::parse(query.project_strategy.as_deref());
+        let drop_subagent_requested = query_flag_truthy(query.drop_subagent.as_deref());
         let extension = normalize_extension_name(query.extension.as_deref());
         let source_event = extension.as_ref().and_then(|_| {
             let raw_source = query
@@ -269,6 +324,7 @@ impl HookEnvelope {
             workspace_override,
             project_override,
             project_strategy,
+            drop_subagent_requested,
             extension,
             source_event,
             title_hint,
@@ -545,6 +601,40 @@ fn normalize_token(value: &str, max_len: usize) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn body_is_subagent_detects_harness_markers() {
+        // grok tags subagent tool-use events with `subagentType`.
+        assert!(body_is_subagent(
+            &serde_json::json!({ "sessionId": "s", "subagentType": "general-purpose" })
+        ));
+        // Claude Code tags its subagent events with `agent_type` / `agent_id`.
+        assert!(body_is_subagent(
+            &serde_json::json!({ "session_id": "s", "agent_type": "workflow-subagent" })
+        ));
+        assert!(body_is_subagent(
+            &serde_json::json!({ "agent_id": "agent-abc123" })
+        ));
+    }
+
+    #[test]
+    fn body_is_subagent_false_for_top_level_and_empty_markers() {
+        // A normal top-level event carries no marker.
+        assert!(!body_is_subagent(
+            &serde_json::json!({ "session_id": "s", "tool_name": "Write" })
+        ));
+        // An empty / blank or non-string marker does not count as a subagent.
+        assert!(!body_is_subagent(
+            &serde_json::json!({ "subagentType": "" })
+        ));
+        assert!(!body_is_subagent(
+            &serde_json::json!({ "subagentType": "   " })
+        ));
+        assert!(!body_is_subagent(
+            &serde_json::json!({ "agent_type": null })
+        ));
+        assert!(!body_is_subagent(&serde_json::json!({})));
+    }
 
     #[test]
     fn parses_known_events() {
