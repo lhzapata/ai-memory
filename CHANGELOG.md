@@ -8,15 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Pi is now supported through a generated `~/.pi/agent/extensions/ai-memory.ts`
+  TypeScript extension that combines lifecycle capture with an HTTP MCP bridge;
+  `install-hooks --agent pi --apply` writes it, while `install-mcp --client pi`
+  prints bridge guidance instead of writing an ignored native `mcp.json`.
 - Generated OpenCode and OMP TypeScript lifecycle hooks now buffer capture
   posts through a bounded best-effort queue instead of spawning one unbounded
   fetch per event, reducing client-side request bursts while preserving direct
   handoff fetches.
 - Corrected the Pi vs Oh My Pi / OMP install split: OMP remains supported via
   `--client omp` / `--agent omp` (or `oh-my-pi`) and writes `.omp` config, while
-  real `pi` install commands now fail closed with guidance until the Pi bridge
-  lands. Users who previously used `pi` to mean OMP should switch to `omp` or
-  `oh-my-pi`.
+  real `pi` remains a separate install surface. Users who previously used `pi`
+  to mean OMP should switch to `omp` or `oh-my-pi`.
 
 ## [1.5.0] - 2026-07-01
 

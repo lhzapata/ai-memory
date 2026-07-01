@@ -191,8 +191,11 @@ pub enum AgentKind {
     OpenClaw,
     /// Google Antigravity CLI (`agy`).
     AntigravityCli,
-    /// Oh My Pi (`omp`) / Pi-compatible coding agent.
+    /// Oh My Pi (`omp`) coding agent.
     Omp,
+    /// Pi coding agent.
+    #[serde(rename = "pi")]
+    Pi,
     /// xAI Grok Build CLI (`grok`).
     Grok,
     /// Anything else (manual capture, future agents).
@@ -213,6 +216,7 @@ impl AgentKind {
             Self::OpenClaw => "openclaw",
             Self::AntigravityCli => "antigravity-cli",
             Self::Omp => "omp",
+            Self::Pi => "pi",
             Self::Grok => "grok",
             Self::Other => "other",
         }
@@ -232,7 +236,8 @@ impl AgentKind {
             "claude-desktop" | "claude_desktop" => Self::ClaudeDesktop,
             "openclaw" | "open-claw" => Self::OpenClaw,
             "antigravity-cli" | "antigravity" | "agy" => Self::AntigravityCli,
-            "omp" | "pi" | "oh-my-pi" => Self::Omp,
+            "pi" => Self::Pi,
+            "omp" | "oh-my-pi" => Self::Omp,
             "grok" => Self::Grok,
             _ => Self::Other,
         }
@@ -346,6 +351,17 @@ mod tests {
 
         let omp = serde_json::to_string(&AgentKind::Omp).unwrap();
         assert_eq!(omp, "\"omp\"");
+        assert_eq!(AgentKind::from_wire("omp"), AgentKind::Omp);
+        assert_eq!(AgentKind::from_wire("oh-my-pi"), AgentKind::Omp);
+
+        let pi = serde_json::to_string(&AgentKind::Pi).unwrap();
+        assert_eq!(pi, "\"pi\"");
+        assert_eq!(AgentKind::Pi.as_str(), "pi");
+        assert_eq!(AgentKind::from_wire("pi"), AgentKind::Pi);
+        assert_eq!(
+            serde_json::from_str::<AgentKind>(&pi).unwrap(),
+            AgentKind::Pi
+        );
 
         let openclaw = serde_json::to_string(&AgentKind::OpenClaw).unwrap();
         assert_eq!(openclaw, "\"openclaw\"");

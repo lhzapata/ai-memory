@@ -84,7 +84,7 @@ metadata.
 > **One-shot tip:** every snippet below is also reachable from the
 > CLI:
 > ```bash
-> ai-memory install-mcp --client gemini-cli   # or cursor / claude-desktop / openclaw / omp / antigravity-cli / vscode-copilot
+> ai-memory install-mcp --client gemini-cli   # or cursor / claude-desktop / openclaw / omp / pi / antigravity-cli / vscode-copilot
 > ```
 
 ---
@@ -446,8 +446,7 @@ OpenClaw distinguishes transports explicitly. Use
 
 The current Oh My Pi package exposes the `omp` binary and native
 `.omp` config directories. Use `omp` (or `oh-my-pi`) for this integration;
-real `pi` is recognized separately, but install commands fail closed until
-the Pi bridge lands in #138.
+real `pi` is recognized separately and uses the generated bridge extension below.
 
 ```json
 {
@@ -472,15 +471,30 @@ This writes `~/.omp/agent/extensions/ai-memory.ts`, which OMP discovers
 as a direct TypeScript extension on startup. Restart `omp` after
 installing or changing the file.
 
-`ai-memory install-mcp --client pi` does not write `~/.pi/agent/mcp.json`:
-Pi core has no native MCP config in ai-memory yet. Users who meant OMP should
-use `--client omp`; real Pi support will be added by the bridge in #138.
-
 **Gotchas:**
 - OMP extensions are TypeScript modules, not shell hooks; stdout is not
   used for context injection.
 - The extension uses OMP lifecycle events for prompt/tool capture and
   `before_agent_start` to inject pending ai-memory handoffs.
+
+## Pi
+
+**Status:** ✅ MCP and lifecycle capture supported via generated bridge
+extension. Pi has no native `mcp.json`; use `install-hooks --agent pi --apply`
+to write `~/.pi/agent/extensions/ai-memory.ts`.
+
+```bash
+ai-memory install-hooks --agent pi --apply
+```
+
+The generated extension posts lifecycle events to `/hook`, fetches pending
+handoffs in `before_agent_start`, initializes ai-memory's HTTP `/mcp` endpoint,
+lists tools, and registers each one with `pi.registerTool`. `install-mcp
+--client pi` intentionally prints this bridge guidance instead of writing an
+ignored `~/.pi/agent/mcp.json`.
+
+OMP / Oh My Pi remains separate: use `--client omp` / `--agent omp` (or
+`oh-my-pi`) for `.omp` paths.
 
 ---
 

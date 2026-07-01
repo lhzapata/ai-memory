@@ -59,14 +59,9 @@ pub fn run(config: &Config, args: SetupAgentArgs) -> Result<()> {
         auth_token: args.auth_token.or_else(|| config.auth.bearer_token.clone()),
         ..args
     };
-    if matches!(args.agent, AgentChoice::Pi) {
-        bail!(
-            "Pi setup is recognized but not supported in ai-memory yet. This command will not write ~/.pi or ~/.omp files. If you meant Oh My Pi / OMP, use the OMP agent/client names instead; real Pi support will arrive with the bridge in issue #138."
-        );
-    }
     if matches!(
         args.agent,
-        AgentChoice::OpenCode | AgentChoice::Omp | AgentChoice::Openclaw
+        AgentChoice::OpenCode | AgentChoice::Pi | AgentChoice::Omp | AgentChoice::Openclaw
     ) {
         emit_extension_setup_hint(&args)?;
         return Ok(());
@@ -174,6 +169,12 @@ fn emit_extension_setup_hint(args: &SetupAgentArgs) -> Result<()> {
             "Then restart OMP so it loads ~/.omp/agent/extensions/ai-memory.ts.",
             "omp",
         ),
+        AgentChoice::Pi => (
+            "Pi",
+            "pi",
+            "Then restart Pi so it loads ~/.pi/agent/extensions/ai-memory.ts.",
+            "pi",
+        ),
         AgentChoice::Openclaw => (
             "OpenClaw",
             "openclaw",
@@ -194,7 +195,13 @@ fn emit_extension_setup_hint(args: &SetupAgentArgs) -> Result<()> {
     }
     println!();
     println!("{restart_note}");
-    println!("Also run `ai-memory install-mcp --client {mcp_client}` to wire MCP separately.");
+    if matches!(args.agent, AgentChoice::Pi) {
+        println!(
+            "MCP tools come through the same generated Pi bridge extension; no native mcp.json is written."
+        );
+    } else {
+        println!("Also run `ai-memory install-mcp --client {mcp_client}` to wire MCP separately.");
+    }
     Ok(())
 }
 
@@ -408,7 +415,7 @@ mod tests {
     }
 
     #[test]
-    fn pi_setup_fails_closed_before_copying() {
+    fn pi_setup_prints_extension_hint_without_copying() {
         let tmp = tempfile::TempDir::new().unwrap();
         let args = SetupAgentArgs {
             agent: AgentChoice::Pi,
@@ -419,9 +426,8 @@ mod tests {
             source: Some(tmp.path().join("source")),
         };
 
-        let err = run(&Config::default(), args).unwrap_err().to_string();
+        run(&Config::default(), args).unwrap();
 
-        assert!(err.contains("real Pi support"), "unexpected error: {err}");
         assert!(!tmp.path().join("hooks").exists());
     }
 

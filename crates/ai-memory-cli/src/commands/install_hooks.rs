@@ -103,6 +103,16 @@ pub(crate) fn omp_extension_path() -> anyhow::Result<std::path::PathBuf> {
         .join("ai-memory.ts"))
 }
 
+/// `~/.pi/agent/extensions/ai-memory.ts` — Pi lifecycle + MCP bridge extension.
+pub(crate) fn pi_extension_path() -> anyhow::Result<std::path::PathBuf> {
+    Ok(home_dir()
+        .context("could not locate $HOME for ~/.pi/agent/extensions")?
+        .join(".pi")
+        .join("agent")
+        .join("extensions")
+        .join("ai-memory.ts"))
+}
+
 /// Run the `install-hooks` subcommand.
 ///
 /// # Errors
@@ -135,7 +145,7 @@ pub fn run(config: &Config, args: InstallHooksArgs) -> Result<()> {
     if args.apply {
         return match args.agent {
             AgentChoice::OpenCode => apply_to_opencode_plugin(&server_url, auth, &args),
-            AgentChoice::Pi => bail_pi_hooks_unsupported(),
+            AgentChoice::Pi => apply_to_pi_extension(&server_url, auth, &args),
             AgentChoice::Omp => apply_to_omp_extension(&server_url, auth, &args),
             AgentChoice::ClaudeCode => {
                 let hooks_dir = resolve_hooks_dir(args.hooks_dir.as_deref(), args.agent)?;
@@ -179,7 +189,7 @@ pub fn run(config: &Config, args: InstallHooksArgs) -> Result<()> {
     let strategy = args.project_strategy.baked();
     match args.agent {
         AgentChoice::OpenCode => render_opencode_plugin(&server_url, auth, strategy),
-        AgentChoice::Pi => bail_pi_hooks_unsupported(),
+        AgentChoice::Pi => render_pi_extension(&server_url, auth, strategy),
         AgentChoice::Omp => render_omp_extension(&server_url, auth, strategy),
         AgentChoice::ClaudeCode => {
             let hooks_dir = resolve_hooks_dir(args.hooks_dir.as_deref(), args.agent)?;
@@ -358,12 +368,6 @@ fn mcp_client_for_agent(agent: AgentChoice) -> Option<McpClient> {
         // auto-infer a hook server URL from it.
         AgentChoice::Pi | AgentChoice::Grok => None,
     }
-}
-
-fn bail_pi_hooks_unsupported<T>() -> Result<T> {
-    anyhow::bail!(
-        "Pi hook install is recognized but not supported in ai-memory yet. This command will not write ~/.pi or ~/.omp files. If you meant Oh My Pi / OMP, use `ai-memory install-hooks --agent omp --apply`; real Pi support will arrive with the bridge in issue #138."
-    )
 }
 
 fn infer_json_mcp_config(
@@ -1480,6 +1484,171 @@ fn resolve_omp_extension_path(args: &InstallHooksArgs) -> Result<PathBuf> {
     omp_extension_path()
 }
 
+fn apply_to_pi_extension(
+    server_url: &str,
+    auth_token: Option<&str>,
+    args: &InstallHooksArgs,
+) -> Result<()> {
+    let path = resolve_pi_extension_path(args)?;
+    let strategy = args.project_strategy.baked();
+    let body = build_pi_extension(server_url, auth_token, strategy);
+
+    let outcome = apply_atomic(&path, move |_existing| Ok(body.clone()))?;
+    println!(
+        "✓ {} {} ({})",
+        outcome.verb(),
+        path.display(),
+        match outcome {
+            ApplyOutcome::Created => "new Pi extension file",
+            ApplyOutcome::Updated => "backup written next to it",
+            ApplyOutcome::NoOp => "already up to date",
+        }
+    );
+    if !matches!(outcome, ApplyOutcome::NoOp) {
+        println!();
+        println!("Pi loads TypeScript extensions from ~/.pi/agent/extensions/ on next start.");
+        println!("Restart Pi for lifecycle capture and MCP tools to take effect.");
+    }
+    Ok(())
+}
+
+fn render_pi_extension(
+    server_url: &str,
+    auth_token: Option<&str>,
+    project_strategy: Option<&str>,
+) -> Result<()> {
+    println!("// Pi extension — write to ~/.pi/agent/extensions/ai-memory.ts");
+    println!("// Or re-run with `--apply` to install it automatically.");
+    println!("// Restart Pi after changing extensions; MCP tools are bridged by this file.");
+    println!();
+    println!(
+        "{}",
+        build_pi_extension(server_url, auth_token, project_strategy)
+    );
+    Ok(())
+}
+
+fn resolve_pi_extension_path(args: &InstallHooksArgs) -> Result<PathBuf> {
+    if let Some(p) = &args.config_file {
+        return Ok(p.clone());
+    }
+    pi_extension_path()
+}
+
+fn build_pi_extension(
+    server_url: &str,
+    auth_token: Option<&str>,
+    project_strategy: Option<&str>,
+) -> String {
+    let lifecycle = build_omp_extension(server_url, auth_token, project_strategy)
+        .replace("install-hooks --agent omp --apply", "install-hooks --agent pi --apply")
+        .replace("const AGENT = \"omp\";", "const AGENT = \"pi\";")
+        .replace(
+            r#"
+  api.on("session.compacting", (_event: any, ctx: any) => {
+    postPreCompact(ctx);
+  });
+"#,
+            "\n",
+        )
+        .replace(
+            "export default function AiMemoryExtension(api: any): void {",
+            &format!(
+                "{}\nexport default function AiMemoryExtension(pi: any): void {{\n  try {{ void bootstrapMcpBridge(pi); }} catch (_e) {{}}",
+                pi_mcp_bridge_source()
+            ),
+        )
+        .replace("api.on(\"", "pi.on(\"");
+    debug_assert!(!lifecycle.contains(".omp"));
+    lifecycle
+}
+
+fn pi_mcp_bridge_source() -> &'static str {
+    r#"
+// ---- MCP bridge ------------------------------------------------------------
+const MCP_SERVER = deriveMcpServer(SERVER);
+const MCP_REQUEST_TIMEOUT_MS = 10000;
+let mcpRequestId = 0;
+
+function deriveMcpServer(server: string): string {
+  const trimmed = server.replace(/\/+$/, "");
+  return trimmed.endsWith("/mcp") ? trimmed : `${trimmed}/mcp`;
+}
+
+function mcpSessionId(ctx: any): string | undefined {
+  const id = sessionID(ctx) ?? ctx?.sessionId ?? ctx?.sessionID ?? ctx?.session?.id;
+  return typeof id === "string" && id.length > 0 ? id : undefined;
+}
+
+function mcpSignal(signal?: AbortSignal): AbortSignal | undefined {
+  const timeout = timeoutSignal(MCP_REQUEST_TIMEOUT_MS);
+  if (!signal) return timeout;
+  if (!timeout) return signal;
+  const anyFactory = (AbortSignal as unknown as { any?: (signals: AbortSignal[]) => AbortSignal }).any;
+  return anyFactory ? anyFactory([signal, timeout]) : timeout;
+}
+
+async function mcpRpc(method: string, params?: unknown, ctx?: any, signal?: AbortSignal): Promise<any> {
+  const id = ++mcpRequestId;
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "Accept": "application/json, text/event-stream",
+    ...authHeaders(),
+  };
+  const session = mcpSessionId(ctx);
+  if (session) {
+    headers["X-Memory-Actor-Session-Id"] = session;
+    headers["Mcp-Session-Id"] = session;
+  }
+  const response = await fetch(MCP_SERVER, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ jsonrpc: "2.0", id, method, params: params ?? {} }),
+    signal: mcpSignal(signal),
+  });
+  if (!response.ok) throw new Error(`ai-memory MCP ${method} failed: HTTP ${response.status}`);
+  const payload = await response.json();
+  if (payload?.error) throw new Error(`ai-memory MCP ${method} failed: ${payload.error.message ?? JSON.stringify(payload.error)}`);
+  if (payload?.result?.isError) throw new Error(`ai-memory MCP ${method} returned isError`);
+  return payload?.result;
+}
+
+function toolInputSchema(tool: any): any {
+  return tool?.inputSchema ?? { type: "object", additionalProperties: true };
+}
+
+async function bootstrapMcpBridge(pi: any): Promise<void> {
+  try {
+    await mcpRpc("initialize", {
+      protocolVersion: "2025-03-26",
+      capabilities: {},
+      clientInfo: { name: "ai-memory-pi-extension", version: "0.0.0" },
+    });
+    try { await mcpRpc("notifications/initialized"); } catch (_e) {}
+    const listed = await mcpRpc("tools/list");
+    for (const tool of listed?.tools ?? []) {
+      try {
+        pi.registerTool({
+          name: tool.name,
+          label: tool.name,
+          description: tool.description,
+          parameters: toolInputSchema(tool),
+          execute: async (_toolCallId: string, params: unknown, signal?: AbortSignal, _onUpdate?: unknown, ctx?: any) => {
+            const result = await mcpRpc("tools/call", { name: tool.name, arguments: params ?? {} }, ctx, signal);
+            return { content: result?.content ?? [], details: result };
+          },
+        });
+      } catch (_e) {
+        // Duplicate registration or tool-shape mismatch must not break lifecycle capture.
+      }
+    }
+  } catch (_e) {
+    // MCP bridge is best-effort; extension load and lifecycle capture must survive.
+  }
+}
+"#
+}
+
 fn build_omp_extension(
     server_url: &str,
     auth_token: Option<&str>,
@@ -1768,6 +1937,10 @@ export default function AiMemoryExtension(api: any): void {{
   }});
 
   api.on("session_before_compact", (_event: any, ctx: any) => {{
+    postPreCompact(ctx);
+  }});
+
+  api.on("session_compact", (_event: any, ctx: any) => {{
     postPreCompact(ctx);
   }});
 
@@ -3221,7 +3394,7 @@ model = "gpt-5"
     }
 
     #[test]
-    fn pi_hook_install_fails_closed_without_writing_even_with_config_override() {
+    fn pi_extension_is_directly_discoverable_by_pi() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("extensions").join("ai-memory.ts");
         let args = InstallHooksArgs {
@@ -3235,10 +3408,75 @@ model = "gpt-5"
             project_strategy: ProjectStrategyArg::Basename,
         };
 
-        let err = run(&Config::default(), args).unwrap_err().to_string();
+        let resolved = resolve_pi_extension_path(&args).unwrap();
 
-        assert!(err.contains("--agent omp"), "unexpected error: {err}");
-        assert!(!path.exists(), "Pi hook install must not write files");
+        assert_eq!(resolved, path);
+        assert_eq!(
+            resolved.file_name().and_then(|s| s.to_str()),
+            Some("ai-memory.ts")
+        );
+        assert_eq!(
+            resolved
+                .parent()
+                .and_then(|p| p.file_name())
+                .and_then(|s| s.to_str()),
+            Some("extensions")
+        );
+    }
+
+    #[test]
+    fn pi_extension_contains_lifecycle_capture_and_mcp_bridge() {
+        let extension = build_pi_extension("http://127.0.0.1:49374/base", Some("tok"), None);
+
+        assert!(extension.contains("export default function AiMemoryExtension(pi: any): void"));
+        assert!(extension.contains("const AGENT = \"pi\";"));
+        assert!(extension.contains("pi.on(\"session_start\""));
+        assert!(extension.contains("pi.on(\"before_agent_start\""));
+        assert!(extension.contains("pi.on(\"tool_call\""));
+        assert!(extension.contains("pi.on(\"tool_result\""));
+        assert!(extension.contains("pi.on(\"session_before_compact\""));
+        assert!(extension.contains("pi.on(\"session_compact\""));
+        assert!(!extension.contains("pi.on(\"session.compacting\""));
+        assert!(extension.contains("pi.on(\"agent_end\""));
+        assert!(extension.contains("pi.on(\"session_shutdown\""));
+        assert!(extension.contains("postHook(\"session-start\""));
+        assert!(extension.contains("postHook(\"user-prompt\""));
+        assert!(extension.contains("postHook(\"pre-tool-use\""));
+        assert!(extension.contains("postHook(\"post-tool-use\""));
+        assert!(extension.contains("postHook(\"pre-compact\""));
+        assert!(extension.contains("postHook(\"stop\""));
+        assert!(extension.contains("postHook(\"session-end\""));
+        assert!(extension.contains("fetchHandoff"));
+        assert!(extension.contains("customType: \"ai-memory-handoff\""));
+        assert!(extension.contains("const MCP_SERVER = deriveMcpServer(SERVER);"));
+        assert!(
+            extension.contains("return trimmed.endsWith(\"/mcp\") ? trimmed : `${trimmed}/mcp`;")
+        );
+        assert!(extension.contains("\"Accept\": \"application/json, text/event-stream\""));
+        assert!(extension.contains("...authHeaders()"));
+        assert!(extension.contains("headers[\"X-Memory-Actor-Session-Id\"] = session;"));
+        assert!(extension.contains("headers[\"Mcp-Session-Id\"] = session;"));
+        assert!(extension.contains("function mcpSignal(signal?: AbortSignal)"));
+        assert!(extension.contains("anyFactory([signal, timeout])"));
+        assert!(extension.contains("mcpRpc(\"initialize\""));
+        assert!(extension.contains("mcpRpc(\"notifications/initialized\""));
+        assert!(extension.contains("mcpRpc(\"tools/list\""));
+        assert!(extension.contains("pi.registerTool"));
+        assert!(extension.contains("label: tool.name"));
+        assert!(extension.contains("parameters: toolInputSchema(tool)"));
+        assert!(extension.contains(
+            "mcpRpc(\"tools/call\", { name: tool.name, arguments: params ?? {} }, ctx, signal)"
+        ));
+        assert!(extension.contains("payload?.error"));
+        assert!(extension.contains("payload?.result?.isError"));
+        assert!(extension.contains("response.ok"));
+        assert!(extension.contains("signal: mcpSignal(signal)"));
+        assert!(extension.contains("Bearer ${TOKEN}"));
+        assert!(extension.contains("tok"));
+        assert!(extension.contains("import { execFileSync } from \"node:child_process\";"));
+        assert!(!extension.contains(".omp"));
+        assert!(!extension.contains("serve --transport stdio"));
+        assert!(!extension.contains("serve --stdio"));
     }
 
     // Windows 11 + Git Bash support matters for regulated enterprise setups
@@ -3283,8 +3521,9 @@ model = "gpt-5"
                     assert!(stdout.contains("~/.omp/agent/extensions/ai-memory.ts"));
                 }
                 "pi" => {
-                    assert!(stdout.contains("does not install real Pi hooks yet"));
-                    assert!(!stdout.contains("install-hooks --agent omp --apply"));
+                    assert!(stdout.contains("install-hooks --agent pi --apply"));
+                    assert!(stdout.contains("~/.pi/agent/extensions/ai-memory.ts"));
+                    assert!(stdout.contains("MCP tools come through the same generated bridge"));
                     assert!(!stdout.contains("~/.omp/agent/extensions/ai-memory.ts"));
                 }
                 _ => unreachable!(),

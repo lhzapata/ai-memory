@@ -9,7 +9,7 @@ path (docker + Claude Code). This page covers everything else:
 - [Arch Linux native packages (AUR)](#arch-linux-native-packages-aur)
   (systemd system service or user service)
 - [Configuring other agent CLIs](#configuring-other-agent-clis)
-  (Codex, OpenCode, OMP, Cursor, Claude Desktop, Gemini CLI, Antigravity CLI, Grok Build CLI, OpenClaw, VS Code Copilot)
+  (Codex, OpenCode, OMP, Pi, Cursor, Claude Desktop, Gemini CLI, Antigravity CLI, Grok Build CLI, OpenClaw, VS Code Copilot)
 - [Installing hooks without docker](#installing-hooks-without-docker)
   (curl-based installer)
 - [Running ai-memory without docker](#running-ai-memory-without-docker)
@@ -548,9 +548,26 @@ ai-memory install-hooks --agent omp --apply \
 Restart OMP after installing or changing the extension; extensions are
 loaded at startup. The ai-memory CLI accepts `--client omp` (or
 `--client oh-my-pi`) for MCP and `--agent omp` (or `--agent oh-my-pi`)
-for hooks; both target OMP's native `.omp` integration surface. Real Pi
-is recognized separately, but `--client pi` and `--agent pi` fail closed
-until the Pi bridge lands in #138.
+for hooks; both target OMP's native `.omp` integration surface.
+
+### Pi
+
+Pi does not read a native `mcp.json`. ai-memory supports Pi through one
+generated TypeScript extension at `~/.pi/agent/extensions/ai-memory.ts`; the
+same file captures lifecycle events and bridges ai-memory's HTTP MCP tools into
+Pi with `pi.registerTool`.
+
+```bash
+ai-memory install-hooks --agent pi --apply \
+    --server-url "http://homelab:49374" \
+    --auth-token "$TOKEN"
+
+# `install-mcp --client pi` prints this guidance instead of writing mcp.json:
+ai-memory install-mcp --client pi --server-url "http://homelab:49374/mcp"
+```
+
+Restart Pi after installing or changing the extension. OMP / Oh My Pi remains
+separate and continues to use `.omp` paths.
 
 ### Bind mounts vs docker cp
 
@@ -663,10 +680,9 @@ docker run --rm akitaonrails/ai-memory:latest \
 The curl script installer supports
 `--agent claude-code|codex|cursor|gemini-cli|antigravity-cli|grok|opencode|openclaw|omp|oh-my-pi|pi`
 and `--to <dir>`; `--help` prints the full flag list. OpenCode,
-OpenClaw, and OMP / Oh My Pi do not need script extraction because
+OpenClaw, OMP / Oh My Pi, and Pi do not need script extraction because
 `install-hooks` generates TypeScript plugin/extension files for them
-instead. Real Pi is recognized separately, but the curl installer only
-prints fail-closed guidance until the Pi bridge lands.
+instead. For Pi, the generated extension also provides the MCP bridge.
 
 This path is friction-free when:
 - You have curl + bash but not docker

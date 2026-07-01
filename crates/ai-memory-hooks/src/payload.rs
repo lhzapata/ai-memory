@@ -903,7 +903,7 @@ mod tests {
         assert_eq!(parse_agent("antigravity"), AgentKind::AntigravityCli);
         assert_eq!(parse_agent("agy"), AgentKind::AntigravityCli);
         assert_eq!(parse_agent("omp"), AgentKind::Omp);
-        assert_eq!(parse_agent("pi"), AgentKind::Omp);
+        assert_eq!(parse_agent("pi"), AgentKind::Pi);
         assert_eq!(parse_agent("oh-my-pi"), AgentKind::Omp);
         // Anything else is `Other`. Critical for the hook router:
         // a typo in the query string must not crash, it just gets
