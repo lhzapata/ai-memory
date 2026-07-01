@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- OpenCode generated plugins now close sessions from the official
+  `session.deleted` event and a deduped best-effort `dispose` fallback, so
+  OpenCode sessions can produce automatic session summaries and handoffs without
+  duplicate `session-end` emissions.
+
 ## [1.6.0] - 2026-07-01
 
 ### Fixed

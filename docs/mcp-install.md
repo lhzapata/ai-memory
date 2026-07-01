@@ -553,8 +553,14 @@ that *starts* the next one - to play nicely with ai-memory:
 
 | Side | What's needed | Covered by |
 |---|---|---|
-| **Ending side** | The agent must create a handoff, either through a true session-end hook or by calling `memory_handoff_begin`. | Built-in for Claude Code, Cursor, Gemini CLI, Grok Build CLI, OpenClaw, and OMP. Codex, OpenCode, and Antigravity CLI have no true session-end event in the current integration, so ask them to call `memory_handoff_begin` before quitting when you need a handoff. |
+| **Ending side** | The agent must create a handoff, either through a true session-end hook or by calling `memory_handoff_begin`. | Built-in for Claude Code, Cursor, Gemini CLI, Grok Build CLI, OpenClaw, OpenCode, and OMP. Codex and Antigravity CLI have no true session-end event in the current integration, so ask them to call `memory_handoff_begin` before quitting when you need a handoff. |
 | **Starting side** | Either (a) the session-start/plugin path injects the handoff via `/handoff`, OR (b) the model proactively calls `memory_handoff_accept` on first turn. | (a) is built-in for Claude Code / Codex / Cursor / Gemini CLI / Antigravity CLI / OpenClaw / OpenCode / OMP. Grok is explicitly excluded because it ignores SessionStart stdout; use (b). (b) works for any MCP-capable client if you nudge the model - see [the managed routing package](usage.md#install-the-routing-snippet-and-agent-skills). |
+
+OpenCode uses its official `session.deleted` plugin event for true session-end
+delivery. Its generated plugin also sends a deduped best-effort close for any
+still-active sessions from `dispose` during normal plugin teardown; abrupt
+process exits can still lose that fallback, so `session.deleted` remains the
+primary close path.
 
 So a typical mixed workflow looks like:
 

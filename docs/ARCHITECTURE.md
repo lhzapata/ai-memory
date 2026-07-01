@@ -59,9 +59,8 @@ from hook paths.
 3. On true `SessionEnd` events, the server synthesises a
    `sessions/<id>.md` summary page (rule-based, no LLM) and opens a
    `Handoff` row for the next agent. Auto-commits the wiki. Clients
-   without a true session-end hook (currently OpenCode and Antigravity
-   CLI) should call `memory_handoff_begin` before quitting when a
-   handoff is needed.
+   without a true session-end hook (currently Antigravity CLI) should call
+   `memory_handoff_begin` before quitting when a handoff is needed.
 4. When `AI_MEMORY_LLM_PROVIDER` is set, `memory_consolidate` rewrites
    that summary into a richer durable page or fans out into a
    multi-page batch under `concepts/`, `decisions/`, `gotchas/`.

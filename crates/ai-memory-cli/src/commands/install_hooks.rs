@@ -1169,12 +1169,14 @@ const HOOK_FLUSH_INTERVAL_MS = 2000;
 const HOOK_FLUSH_THRESHOLD = 20;
 const HOOK_INTER_REQUEST_DELAY_MS = 50;
 const HOOK_REQUEST_TIMEOUT_MS = 2000;
+const HOOK_DISPOSE_DRAIN_BUDGET_MS = 2000;
 const HOOK_IMMEDIATE_EVENTS = new Set(["session-start", "stop", "session-end", "pre-compact"]);
 
 type HookQueueItem = {{ event: string; url: URL; payload: Record<string, unknown> }};
 const hookQueue: HookQueueItem[] = [];
 let hookFlushTimer: ReturnType<typeof setTimeout> | undefined;
 let hookDraining = false;
+let hookDrainPromise: Promise<void> | undefined;
 
 function sleep(ms: number): Promise<void> {{
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -1184,16 +1186,37 @@ function scheduleHookFlush(): void {{
   if (hookFlushTimer) return;
   hookFlushTimer = setTimeout(() => {{
     hookFlushTimer = undefined;
-    void drainHookQueue();
+    void requestHookDrain();
   }}, HOOK_FLUSH_INTERVAL_MS);
   hookFlushTimer.unref?.();
+}}
+
+function requestHookDrain(): Promise<void> {{
+  if (!hookDrainPromise) {{
+    hookDrainPromise = drainHookQueue().finally(() => {{
+      hookDrainPromise = undefined;
+      if (hookQueue.length > 0) void requestHookDrain();
+    }});
+  }}
+  return hookDrainPromise;
+}}
+
+function disposeDrainTimeout(): Promise<void> {{
+  return new Promise((resolve) => {{
+    const timer = setTimeout(resolve, HOOK_DISPOSE_DRAIN_BUDGET_MS);
+    timer.unref?.();
+  }});
+}}
+
+async function drainHookQueueForDispose(): Promise<void> {{
+  await Promise.race([requestHookDrain(), disposeDrainTimeout()]);
 }}
 
 function enqueueHook(event: string, url: URL, payload: Record<string, unknown>): void {{
   if (hookQueue.length >= HOOK_QUEUE_MAX) hookQueue.shift();
   hookQueue.push({{ event, url, payload }});
   if (HOOK_IMMEDIATE_EVENTS.has(event) || hookQueue.length >= HOOK_FLUSH_THRESHOLD) {{
-    void drainHookQueue();
+    void requestHookDrain();
   }} else {{
     scheduleHookFlush();
   }}
@@ -1224,7 +1247,6 @@ async function drainHookQueue(): Promise<void> {{
     }}
   }} finally {{
     hookDraining = false;
-    if (hookQueue.length > 0) void drainHookQueue();
   }}
 }}
 
@@ -1312,6 +1334,15 @@ function startSession(id: string | undefined, cwd: string, extra: Record<string,
   postHook("session-start", {{ sessionID: id, cwd, ...extra }});
 }}
 
+function endSession(id: string | undefined, directory: string, cwd?: string): void {{
+  if (!id || !startedSessions.delete(id)) return;
+  const resolvedCwd = cwd || cwdFor(id, directory);
+  postHook("session-end", {{ sessionID: id, cwd: resolvedCwd }});
+  sessionCwds.delete(id);
+  handoffChecked.delete(id);
+  preCompactLast.delete(id);
+}}
+
 function postPreCompact(id: string | undefined, directory: string): void {{
   startSession(id, cwdFor(id, directory));
   const key = id || "unknown";
@@ -1353,6 +1384,12 @@ async function fetchHandoff(cwd: string): Promise<string | undefined> {{
 
 export const AiMemoryHooks: Plugin = async ({{ directory }}) => {{
   return {{
+    dispose: async () => {{
+      for (const id of Array.from(startedSessions)) {{
+        endSession(id, directory);
+      }}
+      await drainHookQueueForDispose();
+    }},
     event: async (input) => {{
       const event = (input as any).event;
       const properties = event?.properties ?? {{}};
@@ -1369,6 +1406,11 @@ export const AiMemoryHooks: Plugin = async ({{ directory }}) => {{
         const id = properties.sessionID;
         startSession(id, cwdFor(id, directory));
         postHook("stop", {{ sessionID: id, cwd: cwdFor(id, directory) }});
+      }}
+      if (event?.type === "session.deleted") {{
+        const info = properties.info ?? {{}};
+        const id = properties.sessionID ?? info.id;
+        endSession(id, directory, info.directory);
       }}
       if (event?.type === "session.compacted") {{
         const id = properties.sessionID;
@@ -3229,6 +3271,7 @@ model = "gpt-5"
         assert!(plugin.contains("export default AiMemoryHooks"));
         assert!(plugin.contains("const startedSessions = new Set<string>();"));
         assert!(plugin.contains("function startSession"));
+        assert!(plugin.contains("function endSession"));
         assert!(plugin.contains("fetchHandoff"));
         assert!(plugin.contains("function applyMarkerParams"));
         assert!(plugin.contains("readFileSync(marker, \"utf8\")"));
@@ -3242,7 +3285,26 @@ model = "gpt-5"
         ));
         assert!(plugin.contains("applyMarkerParams(url, cwd);"));
         assert!(plugin.contains("postPreCompact"));
+        assert!(plugin.contains("dispose: async () =>"));
+        assert!(plugin.contains("const HOOK_DISPOSE_DRAIN_BUDGET_MS = 2000;"));
+        assert!(plugin.contains("let hookDrainPromise: Promise<void> | undefined;"));
+        assert!(plugin.contains("function requestHookDrain(): Promise<void>"));
+        assert!(plugin.contains("function disposeDrainTimeout(): Promise<void>"));
+        assert!(plugin.contains("timer.unref?.();"));
+        assert!(plugin.contains("async function drainHookQueueForDispose(): Promise<void>"));
+        assert!(plugin.contains("for (const id of Array.from(startedSessions))"));
+        assert!(plugin.contains("await drainHookQueueForDispose();"));
         assert!(plugin.contains("postHook(\"session-start\""));
+        assert!(plugin.contains(r#""session.deleted")"#));
+        assert_eq!(
+            plugin.matches("postHook(\"session-end\"").count(),
+            1,
+            "OpenCode generated plugin must route session closes through one idempotent helper"
+        );
+        assert!(plugin.contains("!startedSessions.delete(id)"));
+        assert!(plugin.contains("sessionCwds.delete(id);"));
+        assert!(plugin.contains("handoffChecked.delete(id);"));
+        assert!(plugin.contains("preCompactLast.delete(id);"));
         assert!(plugin.contains("postHook(\"user-prompt\""));
         assert!(plugin.contains("Bearer ${TOKEN}"));
         assert!(plugin.contains("tok"));
