@@ -135,6 +135,7 @@ pub fn run(config: &Config, args: InstallHooksArgs) -> Result<()> {
     if args.apply {
         return match args.agent {
             AgentChoice::OpenCode => apply_to_opencode_plugin(&server_url, auth, &args),
+            AgentChoice::Pi => bail_pi_hooks_unsupported(),
             AgentChoice::Omp => apply_to_omp_extension(&server_url, auth, &args),
             AgentChoice::ClaudeCode => {
                 let hooks_dir = resolve_hooks_dir(args.hooks_dir.as_deref(), args.agent)?;
@@ -178,6 +179,7 @@ pub fn run(config: &Config, args: InstallHooksArgs) -> Result<()> {
     let strategy = args.project_strategy.baked();
     match args.agent {
         AgentChoice::OpenCode => render_opencode_plugin(&server_url, auth, strategy),
+        AgentChoice::Pi => bail_pi_hooks_unsupported(),
         AgentChoice::Omp => render_omp_extension(&server_url, auth, strategy),
         AgentChoice::ClaudeCode => {
             let hooks_dir = resolve_hooks_dir(args.hooks_dir.as_deref(), args.agent)?;
@@ -327,7 +329,8 @@ fn infer_installed_mcp_config(agent: AgentChoice) -> Option<InferredMcpConfig> {
         McpClient::Openclaw => {
             infer_json_mcp_config(&content, &["mcp", "servers", "ai-memory"], "url")
         }
-        McpClient::Pi => infer_json_mcp_config(&content, &["mcpServers", "ai-memory"], "url"),
+        McpClient::Omp => infer_json_mcp_config(&content, &["mcpServers", "ai-memory"], "url"),
+        McpClient::Pi => None,
         McpClient::AntigravityCli => {
             infer_json_mcp_config(&content, &["mcpServers", "ai-memory"], "serverUrl")
         }
@@ -348,13 +351,19 @@ fn mcp_client_for_agent(agent: AgentChoice) -> Option<McpClient> {
         AgentChoice::Cursor => Some(McpClient::Cursor),
         AgentChoice::GeminiCli => Some(McpClient::GeminiCli),
         AgentChoice::OpenCode => Some(McpClient::OpenCode),
-        AgentChoice::Omp => Some(McpClient::Pi),
+        AgentChoice::Omp => Some(McpClient::Omp),
         AgentChoice::Openclaw => Some(McpClient::Openclaw),
         AgentChoice::AntigravityCli => Some(McpClient::AntigravityCli),
         // Grok manages its own MCP config under ~/.grok/; we don't
         // auto-infer a hook server URL from it.
-        AgentChoice::Grok => None,
+        AgentChoice::Pi | AgentChoice::Grok => None,
     }
+}
+
+fn bail_pi_hooks_unsupported<T>() -> Result<T> {
+    anyhow::bail!(
+        "Pi hook install is recognized but not supported in ai-memory yet. This command will not write ~/.pi or ~/.omp files. If you meant Oh My Pi / OMP, use `ai-memory install-hooks --agent omp --apply`; real Pi support will arrive with the bridge in issue #138."
+    )
 }
 
 fn infer_json_mcp_config(
@@ -2056,7 +2065,7 @@ fn resolve_hooks_dir(explicit: Option<&Path>, agent: AgentChoice) -> Result<Path
         AgentChoice::GeminiCli => "gemini-cli",
         AgentChoice::AntigravityCli => "antigravity-cli",
         AgentChoice::Grok => "grok",
-        AgentChoice::OpenCode | AgentChoice::Omp | AgentChoice::Openclaw => {
+        AgentChoice::OpenCode | AgentChoice::Pi | AgentChoice::Omp | AgentChoice::Openclaw => {
             anyhow::bail!("{agent:?} uses a generated integration, not a hook script directory")
         }
     };
@@ -3211,6 +3220,27 @@ model = "gpt-5"
         );
     }
 
+    #[test]
+    fn pi_hook_install_fails_closed_without_writing_even_with_config_override() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("extensions").join("ai-memory.ts");
+        let args = InstallHooksArgs {
+            agent: AgentChoice::Pi,
+            hooks_dir: None,
+            server_url: "http://127.0.0.1:49374".into(),
+            auth_token: None,
+            as_user: None,
+            apply: true,
+            config_file: Some(path.clone()),
+            project_strategy: ProjectStrategyArg::Basename,
+        };
+
+        let err = run(&Config::default(), args).unwrap_err().to_string();
+
+        assert!(err.contains("--agent omp"), "unexpected error: {err}");
+        assert!(!path.exists(), "Pi hook install must not write files");
+    }
+
     // Windows 11 + Git Bash support matters for regulated enterprise setups
     // where Git Bash is the approved shell available from the corporate
     // repository, so this installer contract should be exercised anywhere
@@ -3227,7 +3257,7 @@ model = "gpt-5"
             return;
         };
 
-        for alias in ["opencode", "openclaw", "pi", "oh-my-pi"] {
+        for alias in ["opencode", "openclaw", "omp", "oh-my-pi", "pi"] {
             let output = Command::new(&bash)
                 .arg(&script)
                 .arg("--agent")
@@ -3248,9 +3278,14 @@ model = "gpt-5"
             match alias {
                 "opencode" => assert!(stdout.contains("install-hooks --agent opencode --apply")),
                 "openclaw" => assert!(stdout.contains("install-hooks --agent openclaw --apply")),
-                "pi" | "oh-my-pi" => {
+                "omp" | "oh-my-pi" => {
                     assert!(stdout.contains("install-hooks --agent omp --apply"));
                     assert!(stdout.contains("~/.omp/agent/extensions/ai-memory.ts"));
+                }
+                "pi" => {
+                    assert!(stdout.contains("does not install real Pi hooks yet"));
+                    assert!(!stdout.contains("install-hooks --agent omp --apply"));
+                    assert!(!stdout.contains("~/.omp/agent/extensions/ai-memory.ts"));
                 }
                 _ => unreachable!(),
             }

@@ -84,7 +84,7 @@ metadata.
 > **One-shot tip:** every snippet below is also reachable from the
 > CLI:
 > ```bash
-> ai-memory install-mcp --client gemini-cli   # or cursor / claude-desktop / openclaw / pi|omp / antigravity-cli / vscode-copilot
+> ai-memory install-mcp --client gemini-cli   # or cursor / claude-desktop / openclaw / omp / antigravity-cli / vscode-copilot
 > ```
 
 ---
@@ -436,18 +436,18 @@ OpenClaw distinguishes transports explicitly. Use
 
 ## Oh My Pi / OMP
 
-**Status:** ✅ MCP supported via `install-mcp --client pi` or
-`--client omp`. ✅ Lifecycle capture supported via
-`ai-memory install-hooks --agent omp --apply` or `--agent pi --apply`.
+**Status:** ✅ MCP supported via `install-mcp --client omp` (or
+`--client oh-my-pi`). ✅ Lifecycle capture supported via
+`ai-memory install-hooks --agent omp --apply` (or `--agent oh-my-pi`).
 
 **Config file:**
 - User: `~/.omp/agent/mcp.json`
 - Project: `.omp/mcp.json`
 
 The current Oh My Pi package exposes the `omp` binary and native
-`.omp` config directories. The ai-memory CLI accepts `--client pi` /
-`--client omp` for MCP and `--agent omp` / `--agent pi` for lifecycle
-capture; they are aliases for this same integration surface.
+`.omp` config directories. Use `omp` (or `oh-my-pi`) for this integration;
+real `pi` is recognized separately, but install commands fail closed until
+the Pi bridge lands in #138.
 
 ```json
 {
@@ -465,13 +465,16 @@ capture; they are aliases for this same integration surface.
 
 ```bash
 ai-memory install-hooks --agent omp --apply
-# or:
-ai-memory install-hooks --agent pi --apply
+# or: ai-memory install-hooks --agent oh-my-pi --apply
 ```
 
 This writes `~/.omp/agent/extensions/ai-memory.ts`, which OMP discovers
 as a direct TypeScript extension on startup. Restart `omp` after
 installing or changing the file.
+
+`ai-memory install-mcp --client pi` does not write `~/.pi/agent/mcp.json`:
+Pi core has no native MCP config in ai-memory yet. Users who meant OMP should
+use `--client omp`; real Pi support will be added by the bridge in #138.
 
 **Gotchas:**
 - OMP extensions are TypeScript modules, not shell hooks; stdout is not

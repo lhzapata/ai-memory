@@ -59,11 +59,16 @@ pub fn run(config: &Config, args: SetupAgentArgs) -> Result<()> {
         auth_token: args.auth_token.or_else(|| config.auth.bearer_token.clone()),
         ..args
     };
+    if matches!(args.agent, AgentChoice::Pi) {
+        bail!(
+            "Pi setup is recognized but not supported in ai-memory yet. This command will not write ~/.pi or ~/.omp files. If you meant Oh My Pi / OMP, use the OMP agent/client names instead; real Pi support will arrive with the bridge in issue #138."
+        );
+    }
     if matches!(
         args.agent,
         AgentChoice::OpenCode | AgentChoice::Omp | AgentChoice::Openclaw
     ) {
-        emit_extension_setup_hint(&args);
+        emit_extension_setup_hint(&args)?;
         return Ok(());
     }
     let agent_sub = match args.agent {
@@ -73,9 +78,9 @@ pub fn run(config: &Config, args: SetupAgentArgs) -> Result<()> {
         AgentChoice::GeminiCli => "gemini-cli",
         AgentChoice::AntigravityCli => "antigravity-cli",
         AgentChoice::Grok => "grok",
-        AgentChoice::OpenCode => unreachable!("opencode handled above"),
-        AgentChoice::Omp => unreachable!("omp handled above"),
-        AgentChoice::Openclaw => unreachable!("openclaw handled above"),
+        AgentChoice::OpenCode | AgentChoice::Pi | AgentChoice::Omp | AgentChoice::Openclaw => {
+            bail!("internal: generated integration should have returned before staging hooks")
+        }
     };
 
     let source = resolve_source(args.source.as_deref(), agent_sub)?;
@@ -142,10 +147,10 @@ pub fn run(config: &Config, args: SetupAgentArgs) -> Result<()> {
             &args,
             &[&ANTIGRAVITY_TOOL_EVENTS, &ANTIGRAVITY_LIFECYCLE_EVENTS],
         ),
-        AgentChoice::OpenCode => unreachable!("opencode handled above"),
-        AgentChoice::Omp => unreachable!("omp handled above"),
-        AgentChoice::Openclaw => {
-            unreachable!("openclaw handled by the generated-integration hint above");
+        AgentChoice::OpenCode | AgentChoice::Pi | AgentChoice::Omp | AgentChoice::Openclaw => {
+            bail!(
+                "internal: generated integration should have returned before emitting staged hooks"
+            )
         }
     }
     Ok(())
@@ -155,7 +160,7 @@ fn normalise_hook_server_url(url: &str) -> String {
     url.trim().trim_end_matches('/').to_string()
 }
 
-fn emit_extension_setup_hint(args: &SetupAgentArgs) {
+fn emit_extension_setup_hint(args: &SetupAgentArgs) -> Result<()> {
     let (label, agent, restart_note, mcp_client) = match args.agent {
         AgentChoice::OpenCode => (
             "OpenCode",
@@ -167,7 +172,7 @@ fn emit_extension_setup_hint(args: &SetupAgentArgs) {
             "OMP",
             "omp",
             "Then restart OMP so it loads ~/.omp/agent/extensions/ai-memory.ts.",
-            "pi",
+            "omp",
         ),
         AgentChoice::Openclaw => (
             "OpenClaw",
@@ -175,7 +180,7 @@ fn emit_extension_setup_hint(args: &SetupAgentArgs) {
             "Then restart the OpenClaw gateway if it does not auto-restart after plugin install.",
             "openclaw",
         ),
-        _ => unreachable!("only generated-integration agents reach this hint"),
+        other => bail!("internal: {other:?} is not a generated-integration agent"),
     };
     println!("# {label} uses a TypeScript extension/plugin, not extracted shell scripts.");
     println!("# Install it directly instead:");
@@ -190,6 +195,7 @@ fn emit_extension_setup_hint(args: &SetupAgentArgs) {
     println!();
     println!("{restart_note}");
     println!("Also run `ai-memory install-mcp --client {mcp_client}` to wire MCP separately.");
+    Ok(())
 }
 
 fn emit_claude_code(emit_root: &Path, args: &SetupAgentArgs) -> Result<()> {
@@ -399,6 +405,24 @@ mod tests {
     fn source_candidates_honour_explicit_override() {
         let candidates = source_candidates(Some(Path::new("/custom/src")), "codex", None);
         assert_eq!(candidates, vec![PathBuf::from("/custom/src/codex")]);
+    }
+
+    #[test]
+    fn pi_setup_fails_closed_before_copying() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let args = SetupAgentArgs {
+            agent: AgentChoice::Pi,
+            to: tmp.path().join("hooks"),
+            host_prefix: None,
+            server_url: "http://127.0.0.1:49374".into(),
+            auth_token: None,
+            source: Some(tmp.path().join("source")),
+        };
+
+        let err = run(&Config::default(), args).unwrap_err().to_string();
+
+        assert!(err.contains("real Pi support"), "unexpected error: {err}");
+        assert!(!tmp.path().join("hooks").exists());
     }
 
     #[test]

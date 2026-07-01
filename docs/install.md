@@ -534,7 +534,7 @@ loaded at startup.
 
 ```bash
 docker run --rm akitaonrails/ai-memory:latest \
-    install-mcp --client pi \
+    install-mcp --client omp \
     --server-url "http://homelab:49374/mcp" \
     --auth-token "$TOKEN"
 
@@ -546,9 +546,11 @@ ai-memory install-hooks --agent omp --apply \
 ```
 
 Restart OMP after installing or changing the extension; extensions are
-loaded at startup. The ai-memory CLI accepts `--client pi` /
-`--client omp` for MCP and `--agent omp` / `--agent pi` for hooks;
-all four target the same current Oh My Pi integration surface.
+loaded at startup. The ai-memory CLI accepts `--client omp` (or
+`--client oh-my-pi`) for MCP and `--agent omp` (or `--agent oh-my-pi`)
+for hooks; both target OMP's native `.omp` integration surface. Real Pi
+is recognized separately, but `--client pi` and `--agent pi` fail closed
+until the Pi bridge lands in #138.
 
 ### Bind mounts vs docker cp
 
@@ -659,10 +661,12 @@ docker run --rm akitaonrails/ai-memory:latest \
 ```
 
 The curl script installer supports
-`--agent claude-code|codex|cursor|gemini-cli|antigravity-cli|grok|opencode|openclaw|omp|pi`
+`--agent claude-code|codex|cursor|gemini-cli|antigravity-cli|grok|opencode|openclaw|omp|oh-my-pi|pi`
 and `--to <dir>`; `--help` prints the full flag list. OpenCode,
-OpenClaw, and OMP do not need script extraction because `install-hooks`
-generates TypeScript plugin/extension files for them instead.
+OpenClaw, and OMP / Oh My Pi do not need script extraction because
+`install-hooks` generates TypeScript plugin/extension files for them
+instead. Real Pi is recognized separately, but the curl installer only
+prints fail-closed guidance until the Pi bridge lands.
 
 This path is friction-free when:
 - You have curl + bash but not docker

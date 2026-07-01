@@ -190,7 +190,7 @@ fn build_plan(args: &UninstallArgs) -> anyhow::Result<Vec<PlannedChange>> {
             ClaudeDesktop,
             GeminiCli,
             Openclaw,
-            Pi,
+            Omp,
             AntigravityCli,
             VsCodeCopilot,
         ] {
@@ -660,12 +660,12 @@ fn mcp_servers_path(client: McpClient) -> Option<&'static [&'static str]> {
         | McpClient::ClaudeDesktop
         | McpClient::Cursor
         | McpClient::GeminiCli
-        | McpClient::Pi
+        | McpClient::Omp
         | McpClient::AntigravityCli => Some(&["mcpServers"]),
         McpClient::OpenCode => Some(&["mcp"]),
         McpClient::Openclaw => Some(&["mcp", "servers"]),
         McpClient::VsCodeCopilot => Some(&["servers"]),
-        McpClient::Codex => None,
+        McpClient::Codex | McpClient::Pi => None,
     }
 }
 
@@ -1156,11 +1156,11 @@ mod tests {
     }
 
     #[test]
-    fn strip_mcp_pi_root_servers() {
+    fn strip_mcp_omp_root_servers() {
         let content = r#"{"mcpServers":{"ai-memory":{"type":"http","url":"http://127.0.0.1:49374/mcp","enabled":true}}}"#;
         let (out, removed) = strip_mcp_json(
             content,
-            McpClient::Pi,
+            McpClient::Omp,
             Some("ai-memory"),
             "http://127.0.0.1:49374/mcp",
         )

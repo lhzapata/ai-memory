@@ -69,7 +69,7 @@ pub enum Command {
     Hook(HookArgs),
     /// Print MCP server registration snippets for any supported client
     /// (Claude Code, Codex, OpenCode, Cursor, Claude Desktop, Gemini
-    /// CLI, OpenClaw, pi). See docs/mcp-install.md for the full guide.
+    /// CLI, OpenClaw, OMP, Pi). See docs/mcp-install.md for the full guide.
     InstallMcp(InstallMcpArgs),
     /// Stage + commit the wiki tree under git.
     Commit(CommitArgs),
@@ -791,10 +791,13 @@ pub enum AgentChoice {
     /// them straight to `--agent`, which used to fail on this one.
     #[value(alias = "opencode")]
     OpenCode,
-    /// Oh My Pi (`omp`) / Pi coding agent fork — TypeScript extension
+    /// Real Pi coding agent. Recognized separately from OMP, but hook
+    /// install intentionally fails closed until the Pi bridge lands.
+    Pi,
+    /// Oh My Pi (`omp`) — TypeScript extension
     /// under `~/.omp/agent/extensions/`. `--apply` writes the extension
     /// file directly; restart `omp` for it to load.
-    #[value(alias = "pi", alias = "oh-my-pi")]
+    #[value(alias = "oh-my-pi")]
     Omp,
     /// OpenClaw personal AI gateway — native plugin package with
     /// session/tool/compaction hooks.
@@ -837,9 +840,11 @@ pub enum McpClient {
     GeminiCli,
     /// OpenClaw personal AI gateway — `~/.openclaw/config.json`.
     Openclaw,
-    /// Oh My Pi (`omp`) / Pi-compatible coding agent — `~/.omp/agent/mcp.json`.
-    #[value(alias = "omp", alias = "oh-my-pi")]
+    /// Real Pi coding agent. Pi core has no native MCP config yet.
     Pi,
+    /// Oh My Pi (`omp`) — `~/.omp/agent/mcp.json`.
+    #[value(alias = "oh-my-pi")]
+    Omp,
     /// Google Antigravity CLI (`agy`) — `~/.gemini/antigravity-cli/mcp_config.json`.
     #[value(alias = "antigravity", alias = "agy")]
     AntigravityCli,
@@ -1360,8 +1365,8 @@ mod tests {
     use clap::Parser;
 
     #[test]
-    fn pi_mcp_client_aliases_parse_to_same_variant() {
-        for alias in ["pi", "omp", "oh-my-pi"] {
+    fn pi_and_omp_mcp_clients_parse_to_distinct_variants() {
+        for (alias, expected_pi) in [("pi", true), ("omp", false), ("oh-my-pi", false)] {
             let cli = Cli::try_parse_from([
                 "ai-memory",
                 "install-mcp",
@@ -1376,8 +1381,9 @@ mod tests {
                 panic!("expected install-mcp command for alias {alias}");
             };
             assert!(
-                matches!(args.client, McpClient::Pi),
-                "alias {alias} must resolve to the Pi/OMP MCP client"
+                matches!(args.client, McpClient::Pi) == expected_pi,
+                "alias {alias} resolved to unexpected MCP client: {:?}",
+                args.client
             );
         }
     }
@@ -1572,8 +1578,8 @@ mod tests {
     }
 
     #[test]
-    fn pi_hook_agent_aliases_parse_to_same_variant() {
-        for alias in ["omp", "pi", "oh-my-pi"] {
+    fn pi_and_omp_hook_agents_parse_to_distinct_variants() {
+        for (alias, expected_pi) in [("pi", true), ("omp", false), ("oh-my-pi", false)] {
             let cli = Cli::try_parse_from([
                 "ai-memory",
                 "install-hooks",
@@ -1588,8 +1594,9 @@ mod tests {
                 panic!("expected install-hooks command for alias {alias}");
             };
             assert!(
-                matches!(args.agent, AgentChoice::Omp),
-                "alias {alias} must resolve to the OMP hook agent"
+                matches!(args.agent, AgentChoice::Pi) == expected_pi,
+                "alias {alias} resolved to unexpected hook agent: {:?}",
+                args.agent
             );
         }
     }

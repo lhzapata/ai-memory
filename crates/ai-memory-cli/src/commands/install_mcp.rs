@@ -11,7 +11,7 @@
 //! community-standard `npx mcp-remote` stdio shim so the same HTTP
 //! endpoint still works.
 //!
-//! OMP/Pi uses a native `~/.omp/agent/mcp.json` file with the same
+//! OMP uses a native `~/.omp/agent/mcp.json` file with the same
 //! `mcpServers` root as several other clients.
 
 use std::path::PathBuf;
@@ -64,6 +64,7 @@ pub fn run(config: &Config, args: InstallMcpArgs) -> Result<()> {
         McpClient::GeminiCli => render_gemini_cli(&args)?,
         McpClient::Openclaw => render_openclaw(&args)?,
         McpClient::Pi => render_pi(&args)?,
+        McpClient::Omp => render_omp(&args)?,
         McpClient::AntigravityCli => render_antigravity_cli(&args)?,
         McpClient::VsCodeCopilot => render_vscode_copilot(&args)?,
     };
@@ -143,7 +144,8 @@ pub(crate) fn mcp_config_path(client: crate::cli::McpClient) -> Result<PathBuf> 
         }
         McpClient::GeminiCli => home()?.join(".gemini").join("settings.json"),
         McpClient::Openclaw => home()?.join(".openclaw").join("config.json"),
-        McpClient::Pi => home()?.join(".omp").join("agent").join("mcp.json"),
+        McpClient::Pi => bail!(pi_mcp_unsupported_message()),
+        McpClient::Omp => home()?.join(".omp").join("agent").join("mcp.json"),
         McpClient::AntigravityCli => home()?
             .join(".gemini")
             .join("antigravity-cli")
@@ -173,6 +175,9 @@ fn resolve_config_file(args: &InstallMcpArgs) -> Result<PathBuf> {
 /// Mutate the resolved client config file in place. Idempotent —
 /// re-runs that produce the same content are reported as no-op.
 fn apply_to_config_file(args: &InstallMcpArgs) -> Result<()> {
+    if matches!(args.client, McpClient::Pi) {
+        bail!(pi_mcp_unsupported_message());
+    }
     let path = resolve_config_file(args)?;
     let outcome = match args.client {
         McpClient::Codex => apply_atomic(&path, |existing| {
@@ -201,12 +206,12 @@ fn json_mcp_location(client: McpClient) -> Option<JsonMcpLocation> {
         | McpClient::ClaudeDesktop
         | McpClient::Cursor
         | McpClient::GeminiCli
-        | McpClient::Pi
+        | McpClient::Omp
         | McpClient::AntigravityCli => Some(JsonMcpLocation::RootMcpServers),
         McpClient::OpenCode => Some(JsonMcpLocation::RootMcp),
         McpClient::Openclaw => Some(JsonMcpLocation::NestedMcpServers),
         McpClient::VsCodeCopilot => Some(JsonMcpLocation::RootServers),
-        McpClient::Codex => None,
+        McpClient::Codex | McpClient::Pi => None,
     }
 }
 
@@ -325,7 +330,7 @@ fn build_mcp_entry(args: &InstallMcpArgs) -> Result<serde_json::Value> {
                 entry.insert("headers".into(), json!({"Authorization": b}));
             }
         }
-        McpClient::Pi => {
+        McpClient::Omp => {
             entry.insert("type".into(), json!("http"));
             entry.insert("url".into(), json!(args.server_url));
             entry.insert("enabled".into(), json!(true));
@@ -608,12 +613,20 @@ fn render_openclaw(args: &InstallMcpArgs) -> Result<String> {
 }
 
 fn render_pi(args: &InstallMcpArgs) -> Result<String> {
+    let _ = args;
+    bail!(pi_mcp_unsupported_message())
+}
+
+fn pi_mcp_unsupported_message() -> &'static str {
+    "Pi core has no native MCP config support in ai-memory yet. If you meant Oh My Pi / OMP, use `ai-memory install-mcp --client omp`; real Pi MCP support will be added by the bridge in issue #138."
+}
+
+fn render_omp(args: &InstallMcpArgs) -> Result<String> {
     Ok(format!(
         "# Oh My Pi / OMP — merge into ~/.omp/agent/mcp.json:\n\
          #\n\
          # The current Oh My Pi package exposes the `omp` binary and native\n\
-         # `.omp` config directories; `pi` is accepted here as the compatible\n\
-         # client name. Restart `omp` after changing MCP config.\n\
+         # `.omp` config directories. Restart `omp` after changing MCP config.\n\
          {snippet}\n",
         snippet = render_json_mcp_fragment(args)?,
     ))
@@ -691,6 +704,7 @@ mod tests {
             McpClient::GeminiCli => render_gemini_cli(&args).unwrap(),
             McpClient::Openclaw => render_openclaw(&args).unwrap(),
             McpClient::Pi => render_pi(&args).unwrap(),
+            McpClient::Omp => render_omp(&args).unwrap(),
             McpClient::AntigravityCli => render_antigravity_cli(&args).unwrap(),
             McpClient::VsCodeCopilot => render_vscode_copilot(&args).unwrap(),
         }
@@ -708,7 +722,7 @@ mod tests {
             McpClient::ClaudeDesktop,
             McpClient::GeminiCli,
             McpClient::Openclaw,
-            McpClient::Pi,
+            McpClient::Omp,
             McpClient::AntigravityCli,
             McpClient::VsCodeCopilot,
         ] {
@@ -740,7 +754,7 @@ mod tests {
             McpClient::ClaudeDesktop,
             McpClient::GeminiCli,
             McpClient::Openclaw,
-            McpClient::Pi,
+            McpClient::Omp,
             McpClient::AntigravityCli,
             McpClient::VsCodeCopilot,
         ] {
@@ -763,6 +777,7 @@ mod tests {
             McpClient::GeminiCli => render_gemini_cli(&args).unwrap(),
             McpClient::Openclaw => render_openclaw(&args).unwrap(),
             McpClient::Pi => render_pi(&args).unwrap(),
+            McpClient::Omp => render_omp(&args).unwrap(),
             McpClient::AntigravityCli => render_antigravity_cli(&args).unwrap(),
             McpClient::VsCodeCopilot => render_vscode_copilot(&args).unwrap(),
         }
@@ -822,7 +837,13 @@ mod tests {
         assert!(render_for_test(McpClient::ClaudeDesktop).contains("mcp-remote"));
         assert!(render_for_test(McpClient::Openclaw).contains("\"streamable-http\""));
         assert!(render_for_test(McpClient::Codex).contains("[mcp_servers.ai-memory]"));
-        assert!(render_for_test(McpClient::Pi).contains("~/.omp/agent/mcp.json"));
+        assert!(render_for_test(McpClient::Omp).contains("~/.omp/agent/mcp.json"));
+        assert!(
+            render_pi(&args_for(McpClient::Pi))
+                .unwrap_err()
+                .to_string()
+                .contains("--client omp")
+        );
         assert!(render_for_test(McpClient::AntigravityCli).contains("\"serverUrl\""));
         // VS Code Copilot must use the `servers` top-level key — the
         // `mcpServers` form is silently ignored by VS Code's MCP
@@ -832,6 +853,20 @@ mod tests {
         assert!(vsc.contains("\"servers\""));
         assert!(!vsc.contains("\"mcpServers\""));
         assert!(vsc.contains("\"type\": \"http\""));
+    }
+
+    #[test]
+    fn pi_apply_fails_closed_without_writing_even_with_config_override() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("mcp.json");
+        let mut args = args_for(McpClient::Pi);
+        args.apply = true;
+        args.config_file = Some(path.clone());
+
+        let err = apply_to_config_file(&args).unwrap_err().to_string();
+
+        assert!(err.contains("--client omp"), "unexpected error: {err}");
+        assert!(!path.exists(), "Pi install must not write ignored config");
     }
 
     /// The Codex apply path must emit block-form `[mcp_servers.<name>]`

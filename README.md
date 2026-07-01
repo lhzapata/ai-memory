@@ -27,7 +27,8 @@
 | OpenCode | Supported | Remote MCP config + generated TypeScript plugin. |
 | Cursor | Supported | MCP config + lifecycle hooks. |
 | Gemini CLI | Supported | MCP config + lifecycle hooks. |
-| Oh My Pi / OMP | Supported | `pi` / `omp` aliases for MCP config + TypeScript extension. |
+| Oh My Pi / OMP | Supported | Use `--client omp` / `--agent omp` (or `oh-my-pi`) for native `.omp` MCP config + TypeScript extension. |
+| Pi | Recognized, pending bridge | `--client pi` / `--agent pi` fail closed with guidance; real Pi MCP/hooks support needs the bridge tracked in #138. |
 | Claude Desktop | MCP-only | Uses `mcp-remote`; no lifecycle hooks. |
 | OpenClaw | Supported | MCP config + native plugin lifecycle hooks. |
 | Antigravity CLI | Supported | MCP config (`serverUrl`) + lifecycle hooks (`agy` alias). |
@@ -81,7 +82,8 @@ priors are at the [bottom](#influences-and-prior-art).
 - **Multi-agent + multi-machine ready.** Supported clients: Claude
   Code, Codex, OpenCode, Cursor, Claude Desktop (via `mcp-remote`),
   Gemini CLI, Antigravity CLI, Grok Build CLI, OpenClaw, Oh My Pi / OMP
-  (`pi` / `omp` aliases), and VS Code GitHub Copilot agent mode
+  (`omp` / `oh-my-pi`), recognized-but-pending Pi, and VS Code GitHub
+  Copilot agent mode
   (MCP-only, workspace `.vscode/mcp.json`).
   Server runs local (loopback) OR on a homelab box (LAN/VPN/cloud)
   with bearer-token auth. Shared servers can opt into
@@ -255,7 +257,8 @@ docker run -d --name ai-memory \
 # 3. Wire your agent CLI in two commands. The wrapper takes care of
 #    mounts + auto-detecting ~/.claude/settings.json. Re-run with
 #    `--agent codex`, `--agent opencode`, `--agent gemini-cli`,
-#    `--agent omp`/`pi`, `--client cursor`, `--client gemini-cli`, etc.
+#    `--agent omp`, `--agent oh-my-pi`, `--client cursor`,
+#    `--client gemini-cli`, etc.
 #    for additional agents; full list in docs/install.md.
 ai-memory install-mcp   --client claude-code --apply
 ai-memory install-hooks --agent  claude-code --apply
