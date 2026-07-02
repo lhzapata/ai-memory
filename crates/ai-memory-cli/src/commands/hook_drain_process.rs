@@ -193,9 +193,8 @@ fn detach_config(try_breakaway: bool) -> DetachConfig {
 #[cfg(windows)]
 fn apply_detach_flags(command: &mut Command, detach: &DetachConfig) {
     use std::os::windows::process::CommandExt as _;
-    if let DetachConfig::WindowsCreationFlags(flags) = detach {
-        command.creation_flags(*flags);
-    }
+    let DetachConfig::WindowsCreationFlags(flags) = detach;
+    command.creation_flags(*flags);
 }
 
 #[cfg(windows)]
@@ -311,15 +310,9 @@ mod tests {
     fn windows_spawn_config_uses_expected_flags_and_breakaway_toggle() {
         let tmp = tempfile::tempdir().unwrap();
         let spec = command_spec(tmp.path()).unwrap();
-        let DetachConfig::WindowsCreationFlags(with_breakaway) = spawn_config(&spec, true).detach
-        else {
-            panic!("windows flags")
-        };
+        let DetachConfig::WindowsCreationFlags(with_breakaway) = spawn_config(&spec, true).detach;
         let DetachConfig::WindowsCreationFlags(without_breakaway) =
-            spawn_config(&spec, false).detach
-        else {
-            panic!("windows flags")
-        };
+            spawn_config(&spec, false).detach;
         assert_ne!(with_breakaway, without_breakaway);
     }
 }

@@ -263,7 +263,25 @@ fn commit_all_fallback(
 }
 
 fn should_try_commit_cli_fallback(error: &git2::Error) -> bool {
-    matches!(error.code(), ErrorCode::NotFound)
+    if matches!(error.code(), ErrorCode::NotFound) {
+        return true;
+    }
+
+    #[cfg(windows)]
+    {
+        // On native Windows, libgit2 can fail to reopen a freshly initialised
+        // wiki repo under dot-prefixed temp dirs with an OS path-resolution
+        // error. The fallback still runs only for Repository::open failures;
+        // real permission or repo corruption errors must also pass through the
+        // Git CLI before they are treated as recoverable.
+        if matches!(error.class(), git2::ErrorClass::Os)
+            && error.message().contains("failed to resolve path")
+        {
+            return true;
+        }
+    }
+
+    false
 }
 
 #[cfg(windows)]
@@ -469,6 +487,18 @@ mod tests {
         let oid = adapter.commit_all("remove a").unwrap();
         assert!(oid.is_some());
         assert_eq!(adapter.commit_count(), 2);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn commit_all_handles_windows_dot_prefixed_temp_roots() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("wiki");
+        let adapter = GitAdapter::open_or_init(&root).unwrap();
+
+        std::fs::write(root.join("foo.md"), "hello").unwrap();
+        assert!(adapter.commit_all("add foo").unwrap().is_some());
+        assert_eq!(adapter.commit_count(), 1);
     }
 
     #[test]

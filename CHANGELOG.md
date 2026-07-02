@@ -12,6 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   1 MiB (previous contents move to `hook-drain.log.old`), so an agent
   pointed at a chronically unreachable server can no longer grow the log
   without bound.
+- Windows hook-spool drain locks now treat native lock-violation responses as
+  expected lock contention, so overlapping background drains skip cleanly
+  instead of failing the single-flight guard.
+- Windows wiki checkpoints now fall back to the Git CLI for native libgit2
+  path-resolution failures when reopening freshly initialised repos, keeping
+  delete and purge operations usable under dot-prefixed temp or wrapper paths.
 
 ### Changed
 - Post-audit cleanup, no behavior change: the `AI_MEMORY_HOOK_PLATFORM`

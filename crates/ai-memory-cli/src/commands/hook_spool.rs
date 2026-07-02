@@ -201,6 +201,24 @@ pub struct DrainLock {
     _file: File,
 }
 
+fn is_drain_lock_busy_error(err: &std::io::Error) -> bool {
+    if err.kind() == std::io::ErrorKind::WouldBlock {
+        return true;
+    }
+
+    #[cfg(windows)]
+    {
+        // Windows can report a contended fs2 byte-range lock as the native
+        // ERROR_LOCK_VIOLATION code instead of mapping it to WouldBlock.
+        const ERROR_LOCK_VIOLATION: i32 = 33;
+        if err.raw_os_error() == Some(ERROR_LOCK_VIOLATION) {
+            return true;
+        }
+    }
+
+    false
+}
+
 /// Outcome for lock-aware drain wrappers.
 #[derive(Debug, PartialEq, Eq)]
 pub enum LockedDrainResult {
@@ -224,7 +242,7 @@ pub fn acquire_drain_lock(spool: &Path, wait: DrainLockWait) -> std::io::Result<
     loop {
         match file.try_lock_exclusive() {
             Ok(()) => return Ok(Some(DrainLock { _file: file })),
-            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => match wait {
+            Err(err) if is_drain_lock_busy_error(&err) => match wait {
                 DrainLockWait::NoWait => return Ok(None),
                 DrainLockWait::Bounded(limit) if started.elapsed() >= limit => return Ok(None),
                 DrainLockWait::Bounded(limit) => {
@@ -888,6 +906,26 @@ mod tests {
                 .is_some(),
             "lock should release on drop"
         );
+    }
+
+    #[test]
+    fn would_block_lock_error_is_lock_busy() {
+        let err = std::io::Error::from(std::io::ErrorKind::WouldBlock);
+        assert!(is_drain_lock_busy_error(&err));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_lock_violation_error_is_lock_busy() {
+        const ERROR_LOCK_VIOLATION: i32 = 33;
+        let err = std::io::Error::from_raw_os_error(ERROR_LOCK_VIOLATION);
+        assert!(is_drain_lock_busy_error(&err));
+    }
+
+    #[test]
+    fn unrelated_lock_error_is_not_lock_busy() {
+        let err = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        assert!(!is_drain_lock_busy_error(&err));
     }
 
     #[tokio::test]

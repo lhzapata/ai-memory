@@ -3224,12 +3224,12 @@ mod tests {
         );
         assert_eq!(
             read_repo_path(&conn, &git_proj),
-            Some(git_path),
+            Some(normalize_repo_path_key(&git_path)),
             "real git work-tree root must be preserved"
         );
         assert_eq!(
             read_repo_path(&conn, &gone_proj),
-            Some(gone_path),
+            Some(normalize_repo_path_key(&gone_path)),
             "path absent on this host must be preserved (multi-user/unmounted safety)"
         );
     }

@@ -167,10 +167,26 @@ target\debug\ai-memory.exe init
 target\debug\ai-memory.exe serve --transport http --bind 127.0.0.1:49374
 ```
 
+For release validation from Git Bash on native Windows, use the same checkout
+with the Rust MSVC toolchain active:
+
+```bash
+cargo test --workspace
+cargo build --locked --release -p ai-memory-cli
+./target/release/ai-memory.exe --version
+```
+
+The version output should match the package version for the checkout.
+
 The Tailwind build step supports the pinned
 `tailwindcss-windows-x64.exe` binary and falls back to PowerShell
 `Invoke-WebRequest` when `curl`/`wget` are unavailable. You should not
 need `TAILWIND_SKIP=1` for normal Windows builds.
+
+Keep Git for Windows' `git.exe` on `PATH` for native builds and hook runs. When
+libgit2 hits a Windows path-resolution error while opening a newly initialized
+wiki repository, ai-memory falls back to the Git CLI instead of treating that
+specific condition as fatal.
 
 From another PowerShell window in the repo:
 
@@ -260,6 +276,12 @@ incremental threshold is a positive event count; invalid values fall back to 32.
 The session-start budget caps how long the hook may block before handoff fetch;
 the background budget caps detached cleanup after session-end and does not keep
 the agent waiting.
+
+On Windows, a contended drain lock can be reported as the native
+`ERROR_LOCK_VIOLATION` code instead of Rust's `WouldBlock` error kind.
+ai-memory treats both as normal lock-busy states, so concurrent drains wait,
+skip, or expire according to the same spool timing rules instead of failing the
+hook.
 
 ## Current Harness Caveats
 
