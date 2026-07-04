@@ -577,6 +577,15 @@ mod tests {
     }
 
     #[test]
+    fn prepare_schema_null_only_type_array_drops_type_keeps_nullable() {
+        let schema = json!({ "type": ["null"] });
+        let prepared = prepare_schema_for_gemini(schema).unwrap();
+        assert!(prepared.get("type").is_none());
+        assert!(prepared.get("anyOf").is_none());
+        assert_eq!(prepared.get("nullable").unwrap(), &json!(true));
+    }
+
+    #[test]
     fn build_request_disables_default_thinking_for_25_flash() {
         let provider =
             GeminiProvider::new(SecretString::from("test-key"), "gemini-2.5-flash").unwrap();
