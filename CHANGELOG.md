@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `bin/ai-memory` no longer fails `install-mcp`, `install-hooks`,
+  `setup-agent`, `install-instructions`, `install-skills`, `uninstall`,
+  and `backup` under rootless Docker. Rootless Docker maps container UID
+  0 back to the real
+  host user but routes any other UID (including the host UID the wrapper
+  always passed via `-u`) through an unrelated subordinate-UID range, so
+  every write to a bind-mounted host path (`~/.claude/settings.json`,
+  the hook staging dir, `$PWD/CLAUDE.md`, skill directories) failed with
+  `Permission denied` or a misleading "does not exist" error. The wrapper
+  now detects rootless Docker via `docker info --format
+  '{{.SecurityOptions}}'` and runs as `-u 0:0` for just the commands that
+  write host-side files; thin-client commands (`status`, `bootstrap`, …)
+  are unaffected since they only touch the `/data` named volume.
+
 ## [1.8.0] - 2026-07-04
 
 ### Added

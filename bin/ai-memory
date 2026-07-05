@@ -257,7 +257,8 @@ done
 NETWORK_ARGS=()
 # Default: map the container process to the host user so files written
 # through bind mounts (~/.claude/settings.json, $PWD/, …) stay editable
-# by the invoking user. macOS is the one exception (see Darwin arm).
+# by the invoking user. macOS is one exception (see Darwin arm); rootless
+# Docker is the other (see the WRITES_HOST_FILES check below).
 USER_ARGS=(-u "$(id -u):$(id -g)")
 
 # Does this invocation RENDER host-side agent config? install-mcp,
@@ -290,11 +291,38 @@ while [ "${idx}" -lt "${#WRAPPER_ARGS[@]}" ]; do
       ;;
   esac
 done
+WRITES_HOST_FILES=0
 case "${WRAPPER_SUBCOMMAND}" in
     install-mcp | install-hooks | setup-agent)
       RENDERS_HOST_CONFIG=1
+      WRITES_HOST_FILES=1
+      ;;
+    # uninstall edits the same host agent-config files the install-*
+    # commands write; backup writes its tarball to a host path. Both go
+    # through the same $HOME/$PWD bind mounts, so they need the same
+    # rootless-Docker UID treatment.
+    install-instructions | install-skills | uninstall | backup)
+      WRITES_HOST_FILES=1
       ;;
 esac
+
+# Rootless Docker runs the whole daemon inside its own user namespace, where
+# container UID 0 maps back to the invoking host user, but any *non-zero*
+# UID we pass (e.g. our own "$(id -u):$(id -g)" above) is instead routed
+# through a separate subordinate-UID range (/etc/subuid, typically 100000+)
+# that has no relation to real host file ownership. So under rootless
+# Docker, "-u <host-uid>:<host-gid>" writes end up owned by an unmapped
+# UID and every bind-mounted write (~/.claude/settings.json, the hook
+# staging dir, $PWD/CLAUDE.md, skill directories, …) fails with
+# EACCES/ENOENT. Running as UID 0 instead hits rootlesskit's primary
+# mapping and lands as the real host user. Only do this for commands that
+# write to a host bind mount: other commands only touch the /data named
+# volume, which isn't host-visible and doesn't have this problem, so leave
+# their UID mapping alone.
+if [ "${WRITES_HOST_FILES}" -eq 1 ] \
+   && "${DOCKER}" info --format '{{.SecurityOptions}}' 2>/dev/null | grep -q 'name=rootless'; then
+  USER_ARGS=(-u 0:0)
+fi
 
 case "$(uname -s 2>/dev/null || true)" in
   Linux)

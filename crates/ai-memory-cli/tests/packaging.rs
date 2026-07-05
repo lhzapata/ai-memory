@@ -204,6 +204,100 @@ fn macos_wrapper_routes_urls_by_real_subcommand() {
     );
 }
 
+// Unlike run_wrapper_on_fake_macos's docker fake (which only ever sees one
+// meaningful call — the final `docker run`), the rootless-Docker UID check
+// calls `docker info` *before* `docker run`, so this fake must dispatch on
+// $1: real stdout for `info` (read by the wrapper's `grep -q rootless`) vs.
+// logging argv to a file for `run` (read back by the test).
+#[cfg(unix)]
+fn run_wrapper_with_fake_docker(args: &[&str], docker_info_stdout: &str) -> String {
+    let tmp = tempfile::tempdir().unwrap();
+    let docker_args = tmp.path().join("docker-args.txt");
+    let docker = tmp.path().join("docker");
+    std::fs::write(
+        &docker,
+        format!(
+            "#!/usr/bin/env bash\n\
+             if [ \"$1\" = info ]; then\n  printf '%s\\n' '{}'\n  exit 0\nfi\n\
+             if [ \"$1\" = run ]; then\n  shift\n  printf '%s\\n' \"$@\" > {}\n  exit 0\nfi\n\
+             exit 0\n",
+            docker_info_stdout,
+            shell_path(&docker_args)
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let mut command = shell_script_command(&repo_root().join("bin/ai-memory"));
+    let output = command
+        .args(args)
+        .env("AI_MEMORY_DOCKER", shell_path(&docker))
+        .env("AI_MEMORY_NO_VERSION_CHECK", "1")
+        .env("AI_MEMORY_DATA_VOLUME", "test-ai-memory-data")
+        .env("HOME", shell_path(tmp.path()))
+        .env_remove("AI_MEMORY_SERVER_URL")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "wrapper failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::read_to_string(docker_args).unwrap()
+}
+
+#[cfg(unix)]
+#[test]
+fn rootless_docker_uses_root_uid_only_for_host_config_commands() {
+    let rootless_info = "[name=apparmor name=seccomp,profile=default name=rootless]";
+
+    for subcommand in [
+        "install-mcp",
+        "install-hooks",
+        "setup-agent",
+        "install-instructions",
+        "install-skills",
+        // uninstall edits the same host agent-config files; backup writes
+        // its tarball to a host path — same bind mounts, same UID rule.
+        "uninstall",
+        "backup",
+    ] {
+        let args = run_wrapper_with_fake_docker(&[subcommand], rootless_info);
+        assert!(
+            args.contains("-u\n0:0"),
+            "{subcommand} writes host bind-mounted files and must run as root \
+             under rootless Docker so the write lands as the real host user \
+             (rootlesskit only maps container UID 0 back to it); got {args}"
+        );
+    }
+
+    let args = run_wrapper_with_fake_docker(&["status"], rootless_info);
+    assert!(
+        !args.contains("-u\n0:0"),
+        "thin-client commands only touch the /data named volume, which isn't \
+         host-visible, so they must keep the host-UID mapping; got {args}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn rootful_docker_keeps_host_uid_for_host_config_commands() {
+    let rootful_info = "[name=seccomp,profile=default]";
+
+    let args = run_wrapper_with_fake_docker(&["install-hooks"], rootful_info);
+    assert!(
+        !args.contains("-u\n0:0"),
+        "rootful Docker must not switch to root UID — that would write \
+         ~/.local/share/ai-memory/hooks owned by root instead of the invoking \
+         user; got {args}"
+    );
+}
+
 #[test]
 fn macos_docs_use_valid_install_commands_and_release_body_points_to_them() {
     let docs = read_repo("docs/macos.md");
