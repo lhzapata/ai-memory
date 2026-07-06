@@ -919,18 +919,34 @@ async fn process(
     )
     .await?;
 
-    if matches!(env.event, HookEvent::SessionEnd)
-        && !state
+    if matches!(env.event, HookEvent::SessionEnd) {
+        match state
             .reader
-            .session_is_open_for_scope_agent(session_id, ws, proj, env.agent)
+            .session_end_disposition(session_id, ws, proj, env.agent)
             .await?
-    {
-        info!(
-            session = %session_id,
-            agent = %env.agent.as_str(),
-            "ignoring SessionEnd for missing, mismatched, or already-ended session"
-        );
-        return Ok(());
+        {
+            ai_memory_store::SessionEndDisposition::Open => {}
+            ai_memory_store::SessionEndDisposition::DropStale => {
+                info!(
+                    session = %session_id,
+                    agent = %env.agent.as_str(),
+                    "ignoring SessionEnd for missing, mismatched, or already-ended session"
+                );
+                return Ok(());
+            }
+            // The agent resumed an ended session under the same id and kept
+            // working (issue #152). Run the full end path again — page
+            // rewrite, ended_at bump, handoff, opt-in LLM consolidation — so
+            // the resumed work reaches the compiled session page instead of
+            // living only in raw observations.
+            ai_memory_store::SessionEndDisposition::ReEndWithNewWork => {
+                info!(
+                    session = %session_id,
+                    agent = %env.agent.as_str(),
+                    "SessionEnd re-ends a resumed session with new work; re-running end path"
+                );
+            }
+        }
     }
 
     // Hooks are fire-and-forget and may arrive out of order. Begin the
@@ -3287,6 +3303,127 @@ mod tests {
                 .unwrap()
                 .is_none(),
             "already-ended synthetic SessionEnd must not create a handoff"
+        );
+    }
+
+    // Issue #152: an agent that resumes an ended session under the same id
+    // and keeps working must get its page re-compiled by the second
+    // SessionEnd instead of that end being dropped as "already-ended".
+    #[tokio::test]
+    async fn resumed_session_second_end_reruns_end_path() {
+        let tmp = TempDir::new().unwrap();
+        let state = make_state(&tmp).await;
+        let sid = "33333333-3333-3333-3333-333333333333";
+        let session_id: SessionId = sid.parse().unwrap();
+        let fire = |event: &str, tool: Option<&str>| {
+            let mut body = serde_json::json!({ "session_id": sid });
+            if let Some(tool) = tool {
+                body["tool_name"] = serde_json::Value::String(tool.into());
+            }
+            HookEnvelope::from_query_and_body(
+                HookQuery {
+                    event: event.into(),
+                    agent: Some("claude-code".into()),
+                    ..Default::default()
+                },
+                body,
+            )
+        };
+
+        // First life: one tool call, then a real end.
+        process(&state, fire("post-tool-use", Some("Bash")), None)
+            .await
+            .unwrap();
+        process(&state, fire("session-end", None), None)
+            .await
+            .unwrap();
+        let disposition = state
+            .reader
+            .session_end_disposition(
+                session_id,
+                state.workspace_id,
+                state.project_id,
+                AgentKind::ClaudeCode,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            disposition,
+            ai_memory_store::SessionEndDisposition::DropStale,
+            "a freshly-ended session with no newer work must drop duplicate ends"
+        );
+        let page_after_first_end = state
+            .reader
+            .recent_pages_for_project(state.workspace_id, state.project_id, 20)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|p| p.path.as_str().starts_with("sessions/"))
+            .expect("first SessionEnd writes the session page");
+
+        // Second life: the agent resumed the same id and did more work.
+        process(&state, fire("post-tool-use", Some("Edit")), None)
+            .await
+            .unwrap();
+        let disposition = state
+            .reader
+            .session_end_disposition(
+                session_id,
+                state.workspace_id,
+                state.project_id,
+                AgentKind::ClaudeCode,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            disposition,
+            ai_memory_store::SessionEndDisposition::ReEndWithNewWork,
+            "observations after ended_at must mark the session re-endable"
+        );
+
+        process(&state, fire("session-end", None), None)
+            .await
+            .unwrap();
+
+        let page_after_second_end = state
+            .reader
+            .recent_pages_for_project(state.workspace_id, state.project_id, 20)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|p| p.path.as_str().starts_with("sessions/"))
+            .expect("second SessionEnd keeps the session page");
+        // The rewrite supersedes the page, so the latest version carries a
+        // new page id.
+        assert_ne!(
+            page_after_first_end.id, page_after_second_end.id,
+            "the re-end must rewrite the session page with the resumed work"
+        );
+        assert!(
+            state
+                .reader
+                .latest_open_handoff(state.workspace_id, state.project_id, None)
+                .await
+                .unwrap()
+                .is_some(),
+            "the re-end must refresh the auto-handoff"
+        );
+        // ended_at advanced past the resumed work: the next duplicate end is
+        // dropped again (pins the de1cef2 dedupe behaviour post-re-end).
+        let disposition = state
+            .reader
+            .session_end_disposition(
+                session_id,
+                state.workspace_id,
+                state.project_id,
+                AgentKind::ClaudeCode,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            disposition,
+            ai_memory_store::SessionEndDisposition::DropStale,
+            "after the re-end, ended_at must cover the resumed work again"
         );
     }
 

@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- A session that is resumed under the same id after an early `SessionEnd`
+  now re-consolidates when it ends again. The end-of-session guard used to
+  drop any `SessionEnd` for a session with `ended_at` set, so a resumed
+  session's page stayed frozen at the first end's content and the resumed
+  work lived only in raw observations. The guard now distinguishes a
+  duplicate/stale end (no observations newer than `ended_at` — still
+  dropped, which keeps `finalize-session` and late spool drains safe) from
+  a genuine re-end with new work behind it, which re-runs the full end
+  path: heuristic page rewrite, `ended_at` bump, auto-handoff refresh, and
+  the opt-in LLM consolidation ([#152]).
 - `bin/ai-memory` no longer fails `install-mcp`, `install-hooks`,
   `setup-agent`, `install-instructions`, `install-skills`, `uninstall`,
   and `backup` under rootless Docker. Rootless Docker maps container UID

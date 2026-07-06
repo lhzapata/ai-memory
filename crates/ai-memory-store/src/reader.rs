@@ -67,6 +67,22 @@ pub struct OpenSession {
     pub cwd: Option<String>,
 }
 
+/// How a `SessionEnd` event should treat its target session — see
+/// [`ReaderPool::session_end_disposition`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionEndDisposition {
+    /// The session is open in the resolved scope/agent: run the normal end
+    /// path.
+    Open,
+    /// Missing, cross-scope, cross-agent, or already ended with no
+    /// observations after `ended_at`: a duplicate or stale end — drop it.
+    DropStale,
+    /// Already ended, but observations arrived after `ended_at`: the agent
+    /// resumed the session under the same id — run the full end path again
+    /// so the resumed work reaches the compiled page (issue #152).
+    ReEndWithNewWork,
+}
+
 /// The latest version of a page's stored content, used as a DB-backed
 /// fallback when the on-disk markdown read fails (index/disk skew). The
 /// markdown file is the source of truth, but the store keeps a faithful copy
@@ -1067,34 +1083,55 @@ impl ReaderPool {
         .await
     }
 
-    /// True when a session exists, belongs to the resolved scope and agent, and
-    /// is still open. Used by SessionEnd ingestion to avoid synthesizing pages
-    /// or handoffs for stale, cross-project, or cross-agent synthetic events.
+    /// How a `SessionEnd` should treat its target session (issue #152).
     ///
-    /// # Errors
-    /// Propagates any SQL or pool error.
-    pub async fn session_is_open_for_scope_agent(
+    /// The old boolean ("is the session open?") conflated two very different
+    /// ended states: a *duplicate/stale* end (nothing happened since
+    /// `ended_at` — drop it, the reason the guard exists) and a *re-end* of a
+    /// resumed session (the agent reused the id and kept working after the
+    /// first end — the end path must run again or the resumed work never
+    /// reaches the compiled session page).
+    pub async fn session_end_disposition(
         &self,
         session_id: SessionId,
         workspace_id: WorkspaceId,
         project_id: ProjectId,
         agent_kind: AgentKind,
-    ) -> StoreResult<bool> {
+    ) -> StoreResult<SessionEndDisposition> {
         let agent = agent_kind.as_str().to_string();
         self.with_conn(move |conn| {
-            let count: u64 = conn.query_row(
-                "SELECT COUNT(*) FROM sessions \
-                 WHERE id = ?1 AND workspace_id = ?2 AND project_id = ?3 \
-                   AND agent_kind = ?4 AND ended_at IS NULL",
-                params![
-                    session_id.as_bytes(),
-                    workspace_id.as_bytes(),
-                    project_id.as_bytes(),
-                    agent,
-                ],
+            let ended_at: Option<Option<i64>> = conn
+                .query_row(
+                    "SELECT ended_at FROM sessions \
+                     WHERE id = ?1 AND workspace_id = ?2 AND project_id = ?3 \
+                       AND agent_kind = ?4",
+                    params![
+                        session_id.as_bytes(),
+                        workspace_id.as_bytes(),
+                        project_id.as_bytes(),
+                        agent,
+                    ],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let Some(ended_at) = ended_at else {
+                // Missing, cross-scope, or cross-agent: never end it.
+                return Ok(SessionEndDisposition::DropStale);
+            };
+            let Some(ended_at) = ended_at else {
+                return Ok(SessionEndDisposition::Open);
+            };
+            let newer: u64 = conn.query_row(
+                "SELECT COUNT(*) FROM observations \
+                 WHERE session_id = ?1 AND created_at > ?2",
+                params![session_id.as_bytes(), ended_at],
                 |row| row.get(0),
             )?;
-            Ok(count > 0)
+            if newer > 0 {
+                Ok(SessionEndDisposition::ReEndWithNewWork)
+            } else {
+                Ok(SessionEndDisposition::DropStale)
+            }
         })
         .await
     }
