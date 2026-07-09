@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.11.1] - 2026-07-09
+
 ### Fixed
 - The documented auto-improvement safety invariant "never rewrite pinned
   pages" is now enforced in code, not just in the reviewer prompt: the
@@ -1678,7 +1680,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Consolidator used server startup default project instead of the
   session's actual project.
 
-[Unreleased]: https://github.com/akitaonrails/ai-memory/compare/v1.11.0...HEAD
+[Unreleased]: https://github.com/akitaonrails/ai-memory/compare/v1.11.1...HEAD
+[1.11.1]: https://github.com/akitaonrails/ai-memory/releases/tag/v1.11.1
 [1.11.0]: https://github.com/akitaonrails/ai-memory/releases/tag/v1.11.0
 [1.10.1]: https://github.com/akitaonrails/ai-memory/releases/tag/v1.10.1
 [1.10.0]: https://github.com/akitaonrails/ai-memory/releases/tag/v1.10.0
