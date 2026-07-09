@@ -501,6 +501,43 @@ async fn start_maintenance_scheduler(
         }));
     }
 
+    // Hollow-project sweep: deletes project rows with zero data of any
+    // kind (pages, sessions, observations, handoffs) once they are older
+    // than HOLLOW_PROJECT_MIN_AGE_DAYS. Safe by construction — nothing
+    // exists to lose — which is why it runs unconditionally under the
+    // maintenance flag with no extra config. Runs once shortly after
+    // startup (so upgrades clean up immediately) and then daily.
+    if maintenance_enabled {
+        /// A week of grace before a hollow row is considered noise, so a
+        /// project created moments before its first real event is never
+        /// racing the sweep.
+        const HOLLOW_PROJECT_MIN_AGE_DAYS: u32 = 7;
+        const HOLLOW_SWEEP_INTERVAL: std::time::Duration =
+            std::time::Duration::from_secs(24 * 60 * 60);
+        /// Short startup delay so the sweep never competes with migration
+        /// and first-request work on boot.
+        const HOLLOW_SWEEP_STARTUP_DELAY: std::time::Duration = std::time::Duration::from_secs(60);
+        let writer = writer.clone();
+        tasks.push(tokio::spawn(async move {
+            tokio::time::sleep(HOLLOW_SWEEP_STARTUP_DELAY).await;
+            loop {
+                match writer
+                    .sweep_hollow_projects(HOLLOW_PROJECT_MIN_AGE_DAYS)
+                    .await
+                {
+                    Ok(deleted) if deleted.is_empty() => {}
+                    Ok(deleted) => info!(
+                        count = deleted.len(),
+                        projects = deleted.join(", "),
+                        "hollow-project sweep deleted empty project rows"
+                    ),
+                    Err(e) => tracing::warn!(error = %e, "hollow-project sweep failed"),
+                }
+                tokio::time::sleep(HOLLOW_SWEEP_INTERVAL).await;
+            }
+        }));
+    }
+
     if maintenance_enabled && lint_interval_secs > 0 {
         let reader = reader.clone();
         let wiki = wiki.clone();

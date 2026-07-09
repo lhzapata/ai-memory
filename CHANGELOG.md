@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Mid-session events can no longer scatter observations into basename
+  "fragment" projects (`sources`, `desktop`, …). The hook router now uses
+  session-sticky attribution: when an event's session already exists, its
+  observations inherit the session's project instead of re-deriving one
+  from the event's cwd — closing the hole left between the v0.12.2
+  cwd-prefix guard (which keys on `repo_path`) and the #103 rule that
+  non-git parents never record one, which together left plain-directory
+  projects unprotected against every mid-session `cd subdir/`. Explicit
+  `.ai-memory.toml` overrides still win, and cwd derivation still decides
+  for session-creating events.
+- V27 data-repair migration re-runs the idempotent V19 repair on upgrade,
+  re-attributing the fragment observations that accumulated since V19 to
+  their sessions' projects and deleting the emptied fragment rows.
+  Reserved projects (`scratch`, `_global`) are exempt.
+
+### Added
+- The maintenance scheduler now sweeps "hollow" project rows — zero
+  pages, sessions, observations, and handoffs — once they are older than
+  seven days, shortly after startup and then daily. Nothing exists to
+  lose in a hollow row (probe/rename residue), so the sweep needs no
+  config; rows holding any data are never touched, and reserved projects
+  are exempt.
+
 ## [1.10.1] - 2026-07-09
 
 ### Fixed

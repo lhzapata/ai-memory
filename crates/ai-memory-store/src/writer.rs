@@ -77,6 +77,10 @@ pub(crate) enum WriteCmd {
         summary_page_id: Option<PageId>,
         reply: oneshot::Sender<StoreResult<()>>,
     },
+    SweepHollowProjects {
+        min_age_days: u32,
+        reply: oneshot::Sender<StoreResult<Vec<String>>>,
+    },
     InsertObservation {
         obs: NewObservation,
         reply: oneshot::Sender<StoreResult<ObservationId>>,
@@ -388,6 +392,22 @@ impl WriterHandle {
         self.send(WriteCmd::EndSession {
             session_id,
             summary_page_id,
+            reply: tx,
+        })
+        .await?;
+        rx.await.map_err(|_| StoreError::WriterClosed)?
+    }
+
+    /// Delete hollow project rows (no data of any kind) older than
+    /// `min_age_days`; returns the deleted names. See
+    /// [`ops::sweep_hollow_projects`].
+    ///
+    /// # Errors
+    /// Propagates store failures.
+    pub async fn sweep_hollow_projects(&self, min_age_days: u32) -> StoreResult<Vec<String>> {
+        let (tx, rx) = oneshot::channel();
+        self.send(WriteCmd::SweepHollowProjects {
+            min_age_days,
             reply: tx,
         })
         .await?;
@@ -1032,6 +1052,13 @@ fn worker_loop(mut conn: Connection, mut rx: mpsc::Receiver<WriteCmd>) {
             } => {
                 let result = ops::end_session(&mut conn, &session_id, summary_page_id.as_ref());
                 send_or_warn(reply, result, "end_session");
+            }
+            WriteCmd::SweepHollowProjects {
+                min_age_days,
+                reply,
+            } => {
+                let result = ops::sweep_hollow_projects(&mut conn, min_age_days);
+                send_or_warn(reply, result, "sweep_hollow_projects");
             }
             WriteCmd::InsertObservation { obs, reply } => {
                 let result = ops::insert_observation(&mut conn, &obs);

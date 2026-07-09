@@ -146,6 +146,62 @@ pub fn get_or_create_project(
     Ok(id)
 }
 
+/// Delete "hollow" project rows: zero pages (any version), zero sessions,
+/// zero observations, zero handoffs, zero auto-improve runs/proposals/
+/// rejections, and older than `min_age_days`. (The per-project
+/// scheduler-state row is bookkeeping created for every project and does
+/// not count as data.) These
+/// are pure bookkeeping noise left behind by probes, renames, and failed
+/// first events — nothing exists to lose, which is what makes this safe to
+/// run on a schedule (the operator-driven `purge-project` covers everything
+/// that actually holds data). Reserved projects (`scratch`, the cwd-less
+/// fallback; `_global`, the preferences scope) are exempt even when empty.
+/// Returns the deleted names for logging.
+///
+/// # Errors
+/// Propagates SQLite failures.
+pub fn sweep_hollow_projects(conn: &mut Connection, min_age_days: u32) -> StoreResult<Vec<String>> {
+    let cutoff =
+        Timestamp::now().as_microsecond() - i64::from(min_age_days) * 24 * 60 * 60 * 1_000_000;
+    let tx = conn.transaction()?;
+    let names: Vec<String> = {
+        let mut stmt = tx.prepare(
+            "SELECT name FROM projects
+             WHERE name NOT IN ('scratch', ?1)
+               AND created_at < ?2
+               AND NOT EXISTS (SELECT 1 FROM pages        WHERE project_id = projects.id)
+               AND NOT EXISTS (SELECT 1 FROM sessions     WHERE project_id = projects.id)
+               AND NOT EXISTS (SELECT 1 FROM observations WHERE project_id = projects.id)
+               AND NOT EXISTS (SELECT 1 FROM handoffs     WHERE project_id = projects.id)
+               AND NOT EXISTS (SELECT 1 FROM auto_improve_runs      WHERE project_id = projects.id)
+               AND NOT EXISTS (SELECT 1 FROM auto_improve_proposals WHERE project_id = projects.id)
+               AND NOT EXISTS (SELECT 1 FROM auto_improve_rejections WHERE project_id = projects.id)",
+        )?;
+        let rows = stmt.query_map(
+            params![ai_memory_core::GLOBAL_SCOPE_PROJECT, cutoff],
+            |row| row.get::<_, String>(0),
+        )?;
+        rows.collect::<Result<_, _>>()?
+    };
+    if !names.is_empty() {
+        tx.execute(
+            "DELETE FROM projects
+             WHERE name NOT IN ('scratch', ?1)
+               AND created_at < ?2
+               AND NOT EXISTS (SELECT 1 FROM pages        WHERE project_id = projects.id)
+               AND NOT EXISTS (SELECT 1 FROM sessions     WHERE project_id = projects.id)
+               AND NOT EXISTS (SELECT 1 FROM observations WHERE project_id = projects.id)
+               AND NOT EXISTS (SELECT 1 FROM handoffs     WHERE project_id = projects.id)
+               AND NOT EXISTS (SELECT 1 FROM auto_improve_runs      WHERE project_id = projects.id)
+               AND NOT EXISTS (SELECT 1 FROM auto_improve_proposals WHERE project_id = projects.id)
+               AND NOT EXISTS (SELECT 1 FROM auto_improve_rejections WHERE project_id = projects.id)",
+            params![ai_memory_core::GLOBAL_SCOPE_PROJECT, cutoff],
+        )?;
+    }
+    tx.commit()?;
+    Ok(names)
+}
+
 /// NULL out `repo_path` values that act as longest-prefix-match catch-alls
 /// (issue #103), so every project nested beneath them stops resolving to the
 /// wrong row after upgrade. A one-shot startup heal; idempotent (a healed row
@@ -2551,6 +2607,165 @@ mod tests {
             )
             .unwrap();
         assert_eq!(parent_rows, 1);
+    }
+
+    // Hollow-project sweep: deletes only rows with zero data of any kind
+    // and past the age cutoff; reserved names survive even when hollow.
+    #[test]
+    fn sweep_hollow_projects_deletes_only_old_dataless_rows() {
+        use ai_memory_core::{AgentKind, NewSession, SessionId};
+        let (_tmp, mut conn, ws, _scratch) = fresh_db();
+
+        // Hollow + old: delete. (Backdate created_at 8 days.)
+        let hollow = get_or_create_project(&mut conn, &ws, "zt", None).unwrap();
+        // Hollow + fresh: keep (inside the grace window).
+        let fresh = get_or_create_project(&mut conn, &ws, "new-probe", None).unwrap();
+        // Old but has a session: keep (not hollow).
+        let with_data = get_or_create_project(&mut conn, &ws, "one-off", None).unwrap();
+        // Reserved + hollow + old: keep.
+        let global =
+            get_or_create_project(&mut conn, &ws, ai_memory_core::GLOBAL_SCOPE_PROJECT, None)
+                .unwrap();
+
+        let eight_days_us: i64 = 8 * 24 * 60 * 60 * 1_000_000;
+        for id in [&hollow, &with_data, &global] {
+            conn.execute(
+                "UPDATE projects SET created_at = created_at - ?1 WHERE id = ?2",
+                params![eight_days_us, &id.as_bytes()[..]],
+            )
+            .unwrap();
+        }
+        begin_session(
+            &mut conn,
+            &NewSession {
+                id: SessionId::new(),
+                workspace_id: ws,
+                project_id: with_data,
+                agent_kind: AgentKind::ClaudeCode,
+                cwd: None,
+            },
+        )
+        .unwrap();
+
+        let deleted = sweep_hollow_projects(&mut conn, 7).unwrap();
+        assert_eq!(deleted, vec!["zt".to_string()]);
+
+        let exists = |id: &ai_memory_core::ProjectId| -> i64 {
+            conn.query_row(
+                "SELECT COUNT(*) FROM projects WHERE id = ?1",
+                params![&id.as_bytes()[..]],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(exists(&hollow), 0, "old hollow row deleted");
+        assert_eq!(exists(&fresh), 1, "fresh hollow row kept (grace window)");
+        assert_eq!(exists(&with_data), 1, "data-bearing row kept");
+        assert_eq!(exists(&global), 1, "reserved _global kept even when hollow");
+
+        // Idempotent: a second pass deletes nothing.
+        assert!(sweep_hollow_projects(&mut conn, 7).unwrap().is_empty());
+    }
+
+    /// V27 re-runs the V19 repair for the fragments that accumulated
+    /// after V19: non-git parents have no repo_path, so the v0.12.2
+    /// prefix guard couldn't anchor subdirectory cwds and per-event
+    /// basename derivation kept minting fragment projects. Idempotent:
+    /// a second pass repairs nothing.
+    #[test]
+    fn v27_reattributes_nongit_fragments_and_preserves_reserved_projects() {
+        use ai_memory_core::{AgentKind, NewObservation, NewSession, ObservationKind, SessionId};
+
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("test.sqlite");
+        let mut conn = Connection::open(&db_path).unwrap();
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+        crate::migrations::run_to(&mut conn, 26).unwrap();
+
+        // Non-git parent (repo_path NULL — the production shape) plus a
+        // basename fragment holding misattributed observations, and the
+        // reserved projects that must survive even when empty.
+        let ws = get_or_create_workspace(&mut conn, "default").unwrap();
+        let parent = get_or_create_project(&mut conn, &ws, "tiktok_analysis", None).unwrap();
+        let fragment = get_or_create_project(&mut conn, &ws, "sources", None).unwrap();
+        let scratch = get_or_create_project(&mut conn, &ws, "scratch", None).unwrap();
+        let global = get_or_create_project(&mut conn, &ws, "_global", None).unwrap();
+
+        let sid = SessionId::new();
+        begin_session(
+            &mut conn,
+            &NewSession {
+                id: sid,
+                workspace_id: ws,
+                project_id: parent,
+                agent_kind: AgentKind::ClaudeCode,
+                cwd: Some("/home/user/tiktok_analysis".into()),
+            },
+        )
+        .unwrap();
+        for i in 0..4 {
+            insert_observation(
+                &mut conn,
+                &NewObservation {
+                    session_id: sid,
+                    workspace_id: ws,
+                    project_id: fragment,
+                    kind: ObservationKind::PostToolUse,
+                    extension: None,
+                    source_event: None,
+                    title: format!("call {i}"),
+                    body: "body".into(),
+                    importance: 5,
+                },
+            )
+            .unwrap();
+        }
+
+        crate::migrations::run_to(&mut conn, 27).unwrap();
+
+        let count = |sql: &str, id: &ai_memory_core::ProjectId| -> i64 {
+            conn.query_row(sql, params![&id.as_bytes()[..]], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(
+            count(
+                "SELECT COUNT(*) FROM observations WHERE project_id = ?1",
+                &parent
+            ),
+            4,
+            "observations re-attributed to the non-git parent"
+        );
+        assert_eq!(
+            count("SELECT COUNT(*) FROM projects WHERE id = ?1", &fragment),
+            0,
+            "emptied fragment row deleted"
+        );
+        assert_eq!(
+            count("SELECT COUNT(*) FROM projects WHERE id = ?1", &scratch),
+            1,
+            "scratch is reserved and survives empty"
+        );
+        assert_eq!(
+            count("SELECT COUNT(*) FROM projects WHERE id = ?1", &global),
+            1,
+            "_global is reserved and survives empty"
+        );
+
+        // Idempotency: replay V27's statements directly (refinery won't
+        // re-run an applied version); zero rows change.
+        let sql = include_str!("../migrations/V27__repair_nongit_fragment_attribution.sql");
+        conn.execute_batch(sql).unwrap();
+        assert_eq!(
+            count(
+                "SELECT COUNT(*) FROM observations WHERE project_id = ?1",
+                &parent
+            ),
+            4
+        );
+        assert_eq!(
+            count("SELECT COUNT(*) FROM projects WHERE id = ?1", &scratch),
+            1
+        );
     }
 
     #[test]

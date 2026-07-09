@@ -1083,6 +1083,48 @@ impl ReaderPool {
         .await
     }
 
+    /// The `(workspace_id, project_id, cwd)` a session was created under,
+    /// or `None` when no such session exists. The hook router uses this for
+    /// session-sticky attribution: mid-session events inherit the session's
+    /// scope instead of re-deriving a project from the event's cwd, so a
+    /// `cd subdir/` inside a non-git project (whose parent has no
+    /// `repo_path` for the prefix match to key on) can no longer scatter
+    /// observations into basename-fragment projects. The session's own cwd
+    /// is returned so the router can bound stickiness to the session's
+    /// directory subtree.
+    ///
+    /// # Errors
+    /// Propagates any SQL or pool error.
+    pub async fn find_session_scope(
+        &self,
+        session_id: SessionId,
+    ) -> StoreResult<Option<(WorkspaceId, ProjectId, Option<String>)>> {
+        self.with_conn(move |conn| {
+            let row = conn
+                .query_row(
+                    "SELECT workspace_id, project_id, cwd FROM sessions WHERE id = ?1",
+                    params![session_id.as_bytes()],
+                    |row| {
+                        Ok((
+                            row.get::<_, Vec<u8>>(0)?,
+                            row.get::<_, Vec<u8>>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            match row {
+                Some((ws, proj, cwd)) => Ok(Some((
+                    WorkspaceId::from_slice(&ws)?,
+                    ProjectId::from_slice(&proj)?,
+                    cwd,
+                ))),
+                None => Ok(None),
+            }
+        })
+        .await
+    }
+
     /// How a `SessionEnd` should treat its target session (issue #152).
     ///
     /// The old boolean ("is the session open?") conflated two very different

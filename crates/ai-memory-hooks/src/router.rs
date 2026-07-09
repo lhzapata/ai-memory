@@ -902,6 +902,40 @@ async fn resolve_project_ids(
     Ok(ids)
 }
 
+/// Whether session-sticky attribution may apply: the event's cwd must sit
+/// inside the session's own cwd subtree, and the session's cwd must be a
+/// meaningful anchor — not missing, not the filesystem root, and not the
+/// user's home directory (broad roots would fold every project beneath
+/// them into one bucket, the #103 catch-all failure mode).
+fn sticky_within_session_tree(
+    session_cwd: Option<&str>,
+    event_cwd: Option<&str>,
+    home_dir: Option<&str>,
+) -> bool {
+    let Some(session_cwd) = session_cwd.filter(|s| !s.trim().is_empty()) else {
+        return false;
+    };
+    let session_norm = normalize_project_path_key(session_cwd);
+    if session_norm == "/" {
+        return false;
+    }
+    if let Some(home) = home_dir
+        && normalize_project_path_key(home) == session_norm
+    {
+        return false;
+    }
+    // A cwd-less event inside a known session still belongs to it — there
+    // is no directory evidence to contradict the session (and per-event
+    // resolution would only shrug it into the server default anyway).
+    let Some(event_cwd) = event_cwd.filter(|s| !s.trim().is_empty()) else {
+        return true;
+    };
+    let event_norm = normalize_project_path_key(event_cwd);
+    // Component-wise containment: "/a/b" contains "/a/b/c" but not
+    // "/a/bc" (Path::starts_with is component-based, not string-based).
+    std::path::Path::new(&event_norm).starts_with(std::path::Path::new(&session_norm))
+}
+
 async fn process_envelope(state: Arc<HookState>, env: HookEnvelope, actor_user: Option<String>) {
     if let Err(e) = process(&state, env, actor_user).await {
         warn!(error = %e, "hook processing failed");
@@ -927,15 +961,62 @@ async fn process(
         user: actor_user.clone(),
         session_id: env.session_id.clone(),
     };
-    let (mut ws, mut proj) = resolve_project_ids(
-        state,
-        env.cwd.as_deref(),
-        env.workspace_override.as_deref(),
-        env.project_override.as_deref(),
-        env.project_strategy,
-        &actor_key,
-    )
-    .await?;
+    // Session-sticky attribution: for an event whose session already
+    // exists, the session's own scope is the source of truth (the same
+    // rationale as the V19 repair). Per-event cwd derivation only decides
+    // for session-CREATING events. Without this, a mid-session `cd subdir/`
+    // inside a NON-GIT project scattered observations into basename
+    // fragments ("sources", "desktop", …): the v0.12.2 prefix match keys on
+    // `repo_path`, and #103 deliberately never records one for non-git
+    // parents, so the match had nothing to anchor to.
+    //
+    // Stickiness is bounded so it can never become a catch-all:
+    // - Explicit marker-file overrides still win — a `.ai-memory.toml`
+    //   naming a project is a deliberate rescope, not drift.
+    // - The event's cwd must sit INSIDE the session's own cwd subtree;
+    //   `cd`-ing out of the session's tree (into a different project)
+    //   falls back to per-event resolution as before.
+    // - A session rooted at a broad directory — the filesystem root or
+    //   the user's home — never sticks, or a stray session started in
+    //   `$HOME` would fold every project beneath it into one bucket
+    //   (the same catch-all failure #103 healed for repo_path keys).
+    let sticky_scope = if env.project_override.is_none() && env.workspace_override.is_none() {
+        state
+            .reader
+            .find_session_scope(session_id)
+            .await?
+            .filter(|(_, _, session_cwd)| {
+                sticky_within_session_tree(
+                    session_cwd.as_deref(),
+                    env.cwd.as_deref(),
+                    state.home_dir.as_deref(),
+                )
+            })
+    } else {
+        None
+    };
+    let (mut ws, mut proj) = match sticky_scope {
+        Some((session_ws, session_proj, _)) => {
+            // Publish the pointer like resolve_project_ids does on a cache
+            // hit: this session being active is exactly what the MCP read
+            // tools should default to.
+            state
+                .active_project
+                .set_for(&actor_key, session_ws, session_proj);
+            (session_ws, session_proj)
+        }
+        None => {
+            resolve_project_ids(
+                state,
+                env.cwd.as_deref(),
+                env.workspace_override.as_deref(),
+                env.project_override.as_deref(),
+                env.project_strategy,
+                &actor_key,
+            )
+            .await?
+        }
+    };
 
     if matches!(env.event, HookEvent::SessionEnd) {
         match state
@@ -1478,6 +1559,160 @@ mod tests {
         // The MCP-shared pointer reflects the most recently resolved
         // project (issue #2) — here, project-beta.
         assert_eq!(state.active_project.get(), Some((ws_b, proj_b)));
+    }
+
+    // Catch-all guards on stickiness: a session accidentally started at a
+    // broad root (`/`, `$HOME`) must NOT fold everything beneath it into
+    // one project, and `cd`-ing OUT of the session's tree must fall back
+    // to per-event resolution.
+    #[test]
+    fn sticky_never_applies_to_broad_roots_or_out_of_tree_cwds() {
+        // Session rooted at the filesystem root: never sticky.
+        assert!(!sticky_within_session_tree(
+            Some("/"),
+            Some("/mnt/data/Projects/real-project"),
+            Some("/home/user"),
+        ));
+        // Session rooted at $HOME: never sticky.
+        assert!(!sticky_within_session_tree(
+            Some("/home/user"),
+            Some("/home/user/Projects/real-project"),
+            Some("/home/user"),
+        ));
+        // Missing session cwd: no anchor, no stickiness.
+        assert!(!sticky_within_session_tree(
+            None,
+            Some("/a/b/c"),
+            Some("/home/user"),
+        ));
+        // Event cwd OUTSIDE the session tree: falls back to per-event
+        // resolution (a real `cd` into a different project).
+        assert!(!sticky_within_session_tree(
+            Some("/a/b"),
+            Some("/a/other"),
+            Some("/home/user"),
+        ));
+        // Component-wise containment, not string-prefix: /a/bc is NOT
+        // inside /a/b.
+        assert!(!sticky_within_session_tree(
+            Some("/a/b"),
+            Some("/a/bc"),
+            Some("/home/user"),
+        ));
+
+        // The intended case: subdirectory of a normal session cwd sticks.
+        assert!(sticky_within_session_tree(
+            Some("/a/b"),
+            Some("/a/b/c"),
+            Some("/home/user"),
+        ));
+        // Same dir sticks; cwd-less events inside a known session stick.
+        assert!(sticky_within_session_tree(
+            Some("/a/b"),
+            Some("/a/b"),
+            Some("/home/user"),
+        ));
+        assert!(sticky_within_session_tree(
+            Some("/a/b"),
+            None,
+            Some("/home/user"),
+        ));
+    }
+
+    // Session-sticky attribution: a mid-session `cd subdir/` inside a
+    // NON-GIT project must keep observations in the session's project.
+    // This is the exact production failure behind the fragment cleanup:
+    // non-git parents have no repo_path, so the v0.12.2 prefix match
+    // can't anchor subdir cwds, and per-event basename derivation minted
+    // "sources"/"desktop"/… fragment projects daily.
+    #[tokio::test]
+    async fn mid_session_subdir_cwd_sticks_to_the_sessions_project() {
+        let tmp = TempDir::new().unwrap();
+        let state = make_state(&tmp).await;
+        let sid = "44444444-4444-4444-4444-444444444444";
+        // Plain directory, deliberately NOT a git repo.
+        let parent = tmp.path().join("tiktok_analysis");
+        let subdir = parent.join("sources");
+        std::fs::create_dir_all(&subdir).unwrap();
+        let fire = |event: &str, cwd: std::path::PathBuf| {
+            HookEnvelope::from_query_and_body(
+                HookQuery {
+                    event: event.into(),
+                    agent: Some("claude-code".into()),
+                    cwd: Some(cwd.to_string_lossy().into_owned()),
+                    ..Default::default()
+                },
+                serde_json::json!({
+                    "session_id": sid,
+                    "cwd": cwd.to_string_lossy(),
+                    "tool_name": "Bash",
+                }),
+            )
+        };
+
+        // Session starts at the parent; a later tool event reports the
+        // subdirectory cwd (agent shells keep their working directory).
+        process(&state, fire("session-start", parent.clone()), None)
+            .await
+            .unwrap();
+        process(&state, fire("post-tool-use", subdir.clone()), None)
+            .await
+            .unwrap();
+
+        let parent_proj = state
+            .reader
+            .find_project(state.workspace_id, "tiktok_analysis".to_string())
+            .await
+            .unwrap()
+            .expect("parent project exists");
+        assert_eq!(
+            state
+                .reader
+                .find_project(state.workspace_id, "sources".to_string())
+                .await
+                .unwrap(),
+            None,
+            "the subdir event must not mint a fragment project"
+        );
+        let session_id: SessionId = sid.parse().unwrap();
+        let observations = state
+            .reader
+            .observations_for_session(session_id)
+            .await
+            .unwrap();
+        assert_eq!(observations.len(), 2);
+        assert!(
+            observations.iter().all(|o| o.project_id == parent_proj),
+            "every observation must carry the session's project"
+        );
+
+        // An explicit marker override mid-session is a deliberate rescope
+        // and must still win over stickiness.
+        let env = HookEnvelope::from_query_and_body(
+            HookQuery {
+                event: "post-tool-use".into(),
+                agent: Some("claude-code".into()),
+                cwd: Some(subdir.to_string_lossy().into_owned()),
+                project: Some("declared-elsewhere".into()),
+                workspace: Some("default".into()),
+                ..Default::default()
+            },
+            serde_json::json!({
+                "session_id": sid,
+                "cwd": subdir.to_string_lossy(),
+                "tool_name": "Bash",
+            }),
+        );
+        process(&state, env, None).await.unwrap();
+        assert!(
+            state
+                .reader
+                .find_project(state.workspace_id, "declared-elsewhere".to_string())
+                .await
+                .unwrap()
+                .is_some(),
+            "marker-file overrides must still rescope"
+        );
     }
 
     // Issue #154: event capture must never create or attribute to the
