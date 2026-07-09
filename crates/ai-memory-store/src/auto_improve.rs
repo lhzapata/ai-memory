@@ -601,10 +601,11 @@ pub fn stage_run(
                     proposal.target_path
                 )));
             }
-            (
-                AutoImproveProposalOperation::Update,
-                Some((id, body_hash, updated_at, _pinned, _fm)),
-            ) => (Some(id), Some(bytes32(body_hash)?), Some(updated_at)),
+            (AutoImproveProposalOperation::Update, Some(snapshot)) => (
+                Some(snapshot.page_id),
+                Some(bytes32(snapshot.body_sha256)?),
+                Some(snapshot.updated_at),
+            ),
             (AutoImproveProposalOperation::Update, None) => {
                 return Err(StoreError::InvalidState(format!(
                     "update proposal target does not exist: {}",
@@ -858,12 +859,9 @@ pub fn approve_proposal(
     // approval and require_approval=false auto-apply alike — so no index
     // window, prompt phrasing, or approval policy can bypass it. Unpinning
     // the page first is the explicit way to allow the rewrite.
-    if current
-        .as_ref()
-        .is_some_and(|(_, _, _, pinned, frontmatter)| {
-            pinned_refusal_applies(&target_path, *pinned, frontmatter)
-        })
-    {
+    if current.as_ref().is_some_and(|snapshot| {
+        pinned_refusal_applies(&target_path, snapshot.pinned, &snapshot.frontmatter_json)
+    }) {
         const REASON: &str =
             "target page is pinned; pinned pages are never rewritten by auto-improvement";
         insert_rejection_for_proposal_in_tx(&tx, input.proposal_id, REASON, now)?;
@@ -883,10 +881,10 @@ pub fn approve_proposal(
     let conflict = match AutoImproveProposalOperation::from_str(&operation)? {
         AutoImproveProposalOperation::Create => current.is_some(),
         AutoImproveProposalOperation::Update => match current {
-            Some((id, body_hash, updated_at, _pinned, _fm)) => {
-                Some(id.as_bytes().to_vec()) != staged_page_id
-                    || Some(body_hash) != staged_body_hash
-                    || Some(updated_at) != staged_updated_at
+            Some(snapshot) => {
+                Some(snapshot.page_id.as_bytes().to_vec()) != staged_page_id
+                    || Some(snapshot.body_sha256) != staged_body_hash
+                    || Some(snapshot.updated_at) != staged_updated_at
             }
             None => true,
         },
@@ -964,25 +962,34 @@ fn mark_decision_in_tx(
     Ok(())
 }
 
+/// The latest version of a proposal's target page at decision time.
+struct TargetSnapshot {
+    page_id: PageId,
+    body_sha256: Vec<u8>,
+    updated_at: i64,
+    pinned: bool,
+    frontmatter_json: String,
+}
+
 fn latest_target_snapshot(
     tx: &rusqlite::Transaction<'_>,
     workspace_id: WorkspaceId,
     project_id: ProjectId,
     target_path: &str,
-) -> StoreResult<Option<(PageId, Vec<u8>, i64, bool, String)>> {
+) -> StoreResult<Option<TargetSnapshot>> {
     let row = tx
         .query_row(
             "SELECT id, body_sha256, updated_at, pinned, frontmatter_json FROM pages \
              WHERE workspace_id = ?1 AND project_id = ?2 AND path = ?3 AND is_latest = 1",
             params![workspace_id.as_bytes(), project_id.as_bytes(), target_path],
             |row| {
-                Ok((
-                    PageId::from_slice(&row.get::<_, Vec<u8>>(0)?).map_err(to_sql_err)?,
-                    row.get::<_, Vec<u8>>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, bool>(3)?,
-                    row.get::<_, String>(4)?,
-                ))
+                Ok(TargetSnapshot {
+                    page_id: PageId::from_slice(&row.get::<_, Vec<u8>>(0)?).map_err(to_sql_err)?,
+                    body_sha256: row.get::<_, Vec<u8>>(1)?,
+                    updated_at: row.get::<_, i64>(2)?,
+                    pinned: row.get::<_, bool>(3)?,
+                    frontmatter_json: row.get::<_, String>(4)?,
+                })
             },
         )
         .optional()?;
