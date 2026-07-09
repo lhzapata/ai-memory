@@ -205,6 +205,27 @@ pub enum AgentKind {
 }
 
 impl AgentKind {
+    /// Every variant, for tests that must cover the full agent surface —
+    /// e.g. the store-level check that the persisted `sessions.agent_kind`
+    /// CHECK constraint accepts every kind (the Zero integration shipped
+    /// with the enum variant but without the V26 migration and only a
+    /// live test caught it). Extend together with the enum.
+    pub const ALL: [Self; 13] = [
+        Self::ClaudeCode,
+        Self::Codex,
+        Self::OpenCode,
+        Self::Cursor,
+        Self::GeminiCli,
+        Self::ClaudeDesktop,
+        Self::OpenClaw,
+        Self::AntigravityCli,
+        Self::Omp,
+        Self::Pi,
+        Self::Grok,
+        Self::Zero,
+        Self::Other,
+    ];
+
     /// Kebab-case wire string matching the serde representation.
     #[must_use]
     pub const fn as_str(self) -> &'static str {

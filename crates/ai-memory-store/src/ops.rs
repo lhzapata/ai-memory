@@ -1434,6 +1434,33 @@ mod tests {
     /// Open a fresh DB with migrations applied + a default workspace
     /// and "scratch" project pre-created. Tuple-return keeps the
     /// tempdir alive for the duration of the test.
+    // Issue #156 regression, class-wide: every AgentKind must survive
+    // begin_session — i.e. the persisted sessions.agent_kind CHECK
+    // constraint must enumerate every variant. Zero shipped with the enum
+    // variant but without the CHECK migration (V26) and only a live test
+    // caught the constraint failure; this pins the whole class so the next
+    // agent addition fails here, before any deploy.
+    #[test]
+    fn begin_session_accepts_every_agent_kind() {
+        let (_tmp, mut conn, ws, proj) = fresh_db();
+        for kind in ai_memory_core::AgentKind::ALL {
+            let session = NewSession {
+                id: ai_memory_core::SessionId::new(),
+                workspace_id: ws,
+                project_id: proj,
+                agent_kind: kind,
+                cwd: None,
+            };
+            begin_session(&mut conn, &session).unwrap_or_else(|e| {
+                panic!(
+                    "sessions.agent_kind CHECK rejects '{}' — add it to the \
+                     constraint with a new migration: {e}",
+                    kind.as_str()
+                )
+            });
+        }
+    }
+
     fn fresh_db() -> (
         TempDir,
         Connection,
