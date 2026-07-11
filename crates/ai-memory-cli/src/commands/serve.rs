@@ -289,6 +289,9 @@ pub async fn run(config: &Config, args: ServeArgs) -> Result<()> {
                 subagent_sessions: std::sync::Arc::new(tokio::sync::Mutex::new(
                     ai_memory_hooks::SubagentSessionSet::default(),
                 )),
+                ingest_rate: std::sync::Arc::new(tokio::sync::Mutex::new(
+                    ai_memory_hooks::IngestRateLimiter::from_env(),
+                )),
                 home_dir: config.home_dir.clone(),
             });
             let admin = admin_router(AdminState {

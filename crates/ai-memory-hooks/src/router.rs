@@ -222,6 +222,112 @@ impl SubagentSessionSet {
     }
 }
 
+/// Cap on distinct rate-limiter keys held in memory. Bounded like
+/// [`SubagentSessionSet`] so a stream of unique keys can't grow unbounded.
+const INGEST_RATE_MAX_KEYS: usize = 4096;
+
+/// One token bucket: `tokens` refills at `refill_per_sec` up to `burst`.
+struct TokenBucket {
+    tokens: f64,
+    last_refill: std::time::Instant,
+}
+
+/// Per-source (session) admission rate limiter that runs BEFORE the global
+/// ingest semaphore, so one runaway source can't exhaust the shared ingest
+/// capacity for everyone — the 2026-06-29 subagent-flood/OOM shape. A bounded
+/// LRU of token buckets; disabled (pass-through) when `refill_per_sec <= 0`.
+pub struct IngestRateLimiter {
+    buckets: HashMap<String, TokenBucket>,
+    order: VecDeque<String>,
+    max_keys: usize,
+    refill_per_sec: f64,
+    burst: f64,
+}
+
+impl IngestRateLimiter {
+    /// A disabled (pass-through) limiter — the default for tests and installs
+    /// that don't set the env knobs.
+    #[must_use]
+    pub fn disabled() -> Self {
+        Self::new(0.0, 0.0)
+    }
+
+    /// `refill_per_sec` tokens/second per key, up to `burst` (min 1).
+    #[must_use]
+    pub fn new(refill_per_sec: f64, burst: f64) -> Self {
+        Self {
+            buckets: HashMap::new(),
+            order: VecDeque::new(),
+            max_keys: INGEST_RATE_MAX_KEYS,
+            refill_per_sec,
+            burst: burst.max(1.0),
+        }
+    }
+
+    /// Build from env: `AI_MEMORY_HOOK_RATE_PER_SEC` (tokens/sec per source; 0
+    /// or unset = disabled, no behaviour change) and `AI_MEMORY_HOOK_RATE_BURST`
+    /// (default = per_sec, min 1).
+    #[must_use]
+    pub fn from_env() -> Self {
+        let per_sec = std::env::var("AI_MEMORY_HOOK_RATE_PER_SEC")
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .filter(|v| *v > 0.0)
+            .unwrap_or(0.0);
+        let burst = std::env::var("AI_MEMORY_HOOK_RATE_BURST")
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .filter(|v| *v > 0.0)
+            .unwrap_or_else(|| per_sec.max(1.0));
+        Self::new(per_sec, burst)
+    }
+
+    /// Try to admit one event for `key` at `now`. `true` when disabled or a
+    /// token was available; `false` when the key is over its burst. O(1)
+    /// amortized; evicts the oldest-inserted key over the cap (a re-inserted
+    /// key just starts full again — a memory bound, not a fairness knob).
+    pub fn try_take(&mut self, key: &str, now: std::time::Instant) -> bool {
+        if self.refill_per_sec <= 0.0 {
+            return true;
+        }
+        if !self.buckets.contains_key(key) {
+            self.buckets.insert(
+                key.to_string(),
+                TokenBucket {
+                    tokens: self.burst,
+                    last_refill: now,
+                },
+            );
+            self.order.push_back(key.to_string());
+            while self.buckets.len() > self.max_keys {
+                if let Some(oldest) = self.order.pop_front() {
+                    self.buckets.remove(&oldest);
+                } else {
+                    break;
+                }
+            }
+        }
+        let bucket = self.buckets.get_mut(key).expect("present after insert");
+        let elapsed = now
+            .saturating_duration_since(bucket.last_refill)
+            .as_secs_f64();
+        bucket.tokens = (bucket.tokens + elapsed * self.refill_per_sec).min(self.burst);
+        bucket.last_refill = now;
+        if bucket.tokens >= 1.0 {
+            bucket.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Number of tracked keys (bounded-ness test).
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.buckets.len()
+    }
+}
+
 /// Shared state passed to the hook handler.
 #[derive(Clone)]
 pub struct HookState {
@@ -258,6 +364,11 @@ pub struct HookState {
     /// In-flight hook processing limiter. Requests acquire one permit before
     /// spawning work and return 429 immediately when saturated.
     pub ingest_semaphore: Arc<tokio::sync::Semaphore>,
+    /// Per-source (session) ingest rate limiter, checked BEFORE the global
+    /// `ingest_semaphore` so one runaway source can't exhaust shared capacity
+    /// and 429 everyone. Disabled (pass-through) unless
+    /// `AI_MEMORY_HOOK_RATE_PER_SEC` is set.
+    pub ingest_rate: Arc<tokio::sync::Mutex<IngestRateLimiter>>,
     /// Opt-in (`AI_MEMORY_CONSOLIDATE_ON_SESSION_END`): when true and a
     /// `consolidator` is present, SessionEnd also runs LLM consolidation on
     /// top of the always-written heuristic session page. Off by default so
@@ -313,6 +424,19 @@ async fn handle_hook(
     };
     if should_drop_subagent(&state, &env, &actor_key).await {
         return (StatusCode::ACCEPTED, "subagent capture dropped");
+    }
+    // Per-source rate limit BEFORE the global semaphore, so one runaway
+    // session can't drain shared ingest capacity and 429 everyone. Keyed by
+    // session id (the flooding-agent shape); disabled unless configured.
+    let rate_key = env.session_id.clone().unwrap_or_default();
+    if !state
+        .ingest_rate
+        .lock()
+        .await
+        .try_take(&rate_key, std::time::Instant::now())
+    {
+        warn!(source = %rate_key, "hook ingest rate limit exceeded for source; dropping event with 429");
+        return (StatusCode::TOO_MANY_REQUESTS, "hook source rate limited");
     }
     let Ok(permit) = state.ingest_semaphore.clone().try_acquire_owned() else {
         warn!("hook ingest saturated; dropping event with 429");
@@ -395,6 +519,23 @@ async fn handle_hook_batch(
         if should_drop_subagent(&state, &env, &actor_key).await {
             accepted += 1;
             continue;
+        }
+        // Per-source rate limit (see `handle_hook`): when this source is over
+        // its burst, stop the batch at the committed prefix so the client
+        // retries the rest as tokens refill — smoothing a flood rather than
+        // OOMing on it (the 2026-06-29 flood came through /hook/batch).
+        let rate_key = env.session_id.clone().unwrap_or_default();
+        if !state
+            .ingest_rate
+            .lock()
+            .await
+            .try_take(&rate_key, std::time::Instant::now())
+        {
+            warn!(accepted, source = %rate_key, "hook batch source rate limited; stopping at committed prefix");
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(HookBatchAck { accepted }),
+            );
         }
         // Mirror single `/hook`: subagent drops consume no ingest capacity, and
         // only events we will actually process acquire a permit. The batch loop
@@ -1431,6 +1572,7 @@ mod tests {
             active_project: ActiveProject::new(),
             consolidate_on_session_end: false,
             subagent_sessions: Arc::new(tokio::sync::Mutex::new(SubagentSessionSet::default())),
+            ingest_rate: Arc::new(tokio::sync::Mutex::new(IngestRateLimiter::disabled())),
             home_dir: None,
             ingest_semaphore: Arc::new(tokio::sync::Semaphore::new(
                 DEFAULT_HOOK_INGEST_MAX_IN_FLIGHT,
@@ -1768,6 +1910,82 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(created, None, "event capture must not create _global");
+    }
+
+    #[test]
+    fn ingest_rate_limiter_disabled_passes_through() {
+        let mut rl = IngestRateLimiter::disabled();
+        let now = std::time::Instant::now();
+        for _ in 0..10_000 {
+            assert!(rl.try_take("s", now), "disabled limiter must always admit");
+        }
+    }
+
+    #[test]
+    fn ingest_rate_limiter_isolates_keys_and_refills() {
+        // burst=2, refill=1/s. Key "a" burns its 2 tokens; the 3rd is denied.
+        // Key "b" is unaffected; after 1s "a" refills exactly one token.
+        let mut rl = IngestRateLimiter::new(1.0, 2.0);
+        let t0 = std::time::Instant::now();
+        assert!(rl.try_take("a", t0));
+        assert!(rl.try_take("a", t0));
+        assert!(!rl.try_take("a", t0), "3rd event for 'a' is over burst");
+        assert!(rl.try_take("b", t0), "a different source keeps flowing");
+        let t1 = t0 + std::time::Duration::from_secs(1);
+        assert!(rl.try_take("a", t1), "'a' refilled after 1s");
+        assert!(!rl.try_take("a", t1), "only one token refilled");
+    }
+
+    #[test]
+    fn ingest_rate_limiter_is_bounded() {
+        let mut rl = IngestRateLimiter::new(1.0, 1.0);
+        let now = std::time::Instant::now();
+        for i in 0..(INGEST_RATE_MAX_KEYS + 100) {
+            rl.try_take(&format!("k{i}"), now);
+        }
+        assert!(
+            rl.len() <= INGEST_RATE_MAX_KEYS,
+            "keys must stay bounded, got {}",
+            rl.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_hook_rate_limits_a_flooding_source_but_not_others() {
+        let tmp = TempDir::new().unwrap();
+        let mut state = make_state(&tmp).await;
+        // burst=1, ~no refill within the test window: a source's 2nd event is
+        // over budget while a different source is unaffected.
+        state.ingest_rate = Arc::new(tokio::sync::Mutex::new(IngestRateLimiter::new(0.001, 1.0)));
+        let state = Arc::new(state);
+
+        async fn hit(state: Arc<HookState>, sid: &str) -> StatusCode {
+            handle_hook(
+                State(state),
+                Query(HookQuery {
+                    event: "session-start".into(),
+                    agent: Some("claude-code".into()),
+                    ..Default::default()
+                }),
+                None,
+                Json(serde_json::json!({ "session_id": sid })),
+            )
+            .await
+            .into_response()
+            .status()
+        }
+
+        assert_eq!(hit(state.clone(), "flooder").await, StatusCode::ACCEPTED);
+        assert_eq!(
+            hit(state.clone(), "flooder").await,
+            StatusCode::TOO_MANY_REQUESTS,
+            "2nd event from the same source is over burst → 429"
+        );
+        assert_eq!(
+            hit(state.clone(), "other").await,
+            StatusCode::ACCEPTED,
+            "a different source must not be rate limited"
+        );
     }
 
     #[tokio::test]
