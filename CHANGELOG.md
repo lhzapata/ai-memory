@@ -10,22 +10,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - `ai-memory install-instructions` and `ai-memory uninstall --only instructions`
   now match only line-anchored routing markers, handle CRLF marker lines, and
-  repair the exact orphan-tail shape left by older refreshes when the snippet
-  body mentioned an end marker inline.
+  repair one or more exact orphan-tail copies left by older refreshes when the
+  snippet body mentioned an end marker inline ([#161]).
 - Project creation now emits a warning when the same project name already
   exists in another workspace, helping catch accidental cross-workspace
-  misroutes while preserving legal id-namespaced homonyms.
+  misroutes while preserving legal id-namespaced homonyms ([#160]).
 - `memory_query` now runs the raw-observation fallback for explicit `scopes`
   requests when compiled wiki pages miss, so scoped cross-project searches can
   still surface bounded raw session matches without falling back to the current
-  project.
-- Upgraded `crossbeam-epoch` to the RUSTSEC-2026-0204 fixed release.
+  project ([#159]).
+- Upgraded `crossbeam-epoch` to the RUSTSEC-2026-0204 fixed release ([#162]).
 - Fixed the Docker wrapper on macOS with rootless Docker so host-config
   commands (`install-mcp`, `install-hooks`, `install-instructions`, and
   related setup/removal commands) keep the `-u 0:0` mapping needed to write
-  bind-mounted agent configuration as the invoking host user.
+  bind-mounted agent configuration as the invoking host user ([#162]).
 - Stabilized the Windows uninstall purge-preview regression test against
-  verbatim temp-path spelling.
+  verbatim temp-path spelling ([#162]).
 
 ## [1.11.1] - 2026-07-09
 

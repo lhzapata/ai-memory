@@ -513,9 +513,16 @@ fn strip_instructions_block(content: &str) -> (String, bool) {
 }
 
 fn strip_legacy_orphan_tail(tail: &str) -> &str {
-    tail.strip_prefix(LEGACY_ORPHAN_TAIL_LF)
-        .or_else(|| tail.strip_prefix(LEGACY_ORPHAN_TAIL_CRLF))
-        .unwrap_or(tail)
+    let mut rest = tail;
+    loop {
+        if let Some(stripped) = rest.strip_prefix(LEGACY_ORPHAN_TAIL_LF) {
+            rest = stripped;
+        } else if let Some(stripped) = rest.strip_prefix(LEGACY_ORPHAN_TAIL_CRLF) {
+            rest = stripped;
+        } else {
+            return rest;
+        }
+    }
 }
 
 /// True when a hook command string was written by ai-memory. Legacy script
@@ -930,6 +937,16 @@ mod tests {
     fn strip_removes_exact_legacy_orphan_tail() {
         let content =
             format!("# Top\n\n{MARKER_START}\nBODY\n{MARKER_END}\n{LEGACY_ORPHAN_TAIL_LF}More\n");
+        let (stripped, found) = strip_instructions_block(&content);
+        assert!(found);
+        assert_eq!(stripped, "# Top\n\nMore\n");
+    }
+
+    #[test]
+    fn strip_removes_repeated_legacy_orphan_tails() {
+        let content = format!(
+            "# Top\n\n{MARKER_START}\nBODY\n{MARKER_END}\n{LEGACY_ORPHAN_TAIL_LF}{LEGACY_ORPHAN_TAIL_CRLF}More\n"
+        );
         let (stripped, found) = strip_instructions_block(&content);
         assert!(found);
         assert_eq!(stripped, "# Top\n\nMore\n");

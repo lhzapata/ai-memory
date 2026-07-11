@@ -1067,8 +1067,10 @@ impl AiMemoryServer {
         self
     }
 
-    /// Search the compiled wiki via FTS5/vector/graph retrieval. Falls back
-    /// to bounded raw observation search when no compiled page matches.
+    /// Search the compiled wiki via FTS5/vector/graph retrieval. Default,
+    /// explicit project, and explicit `scopes` searches fall back to bounded
+    /// raw observation search when no compiled page matches; `global=true`
+    /// searches compiled wiki pages across projects only.
     #[tool(description = "Search the project's long-term memory wiki — \
         prior sessions, decisions, gotchas, architecture notes captured \
         by ai-memory across earlier runs. Call this BEFORE proposing \
@@ -1077,8 +1079,10 @@ impl AiMemoryServer {
         FTS5 + graph RRF + (when configured) vector RRF re-ranking. \
         Returns up to `limit` pages with HTML-marked snippets and a rank \
         score (lower rank = better match). Only latest page versions. \
-        If compiled wiki search misses, `raw_hits` contains bounded raw \
-        observation fallback matches. Default-scoped calls also return \
+        If compiled wiki search misses in default/project/`scopes` mode, \
+        `raw_hits` contains bounded raw observation fallback matches; \
+        `global=true` searches compiled wiki pages only and returns no raw \
+        fallback. Default-scoped calls also return \
         `global_scope_hits`: standing user/team preferences from the \
         reserved `_global` scope that apply across projects. Set \
         `global=true` to search EVERY \
@@ -2309,8 +2313,9 @@ impl AiMemoryServer {
         asks to install or refresh ai-memory routing in this project. \
         After calling, use your Write/Edit tool to preserve non-ai-memory \
         user content: replace only an existing `<!-- ai-memory:start -->` \
-        / `<!-- ai-memory:end -->` block or append `markered_block` with \
-        one blank line, then write every `managed_skills` item beneath \
+        / `<!-- ai-memory:end -->` block whose delimiters appear alone on \
+        their own lines, or append `markered_block` with one blank line, \
+        then write every `managed_skills` item beneath \
         the chosen skill root using its `relative_path`. This tool is \
         read-only and is the source of truth for the snippet and skills. \
         Skill files are ai-memory-managed only when they contain the \
@@ -2361,7 +2366,7 @@ impl AiMemoryServer {
             },
             "notes": [
                 "Pick the filename matching your own agent identity.",
-                "If the target file already contains <!-- ai-memory:start --> / <!-- ai-memory:end -->, replace ONLY that block in place; preserve every other line.",
+                "If the target file already contains <!-- ai-memory:start --> / <!-- ai-memory:end --> delimiters alone on their own lines, replace ONLY that line-delimited block in place; ignore inline mentions and preserve every other line.",
                 "If the file doesn't exist, create it with just the markered_block (plus a trailing newline).",
                 "If the file exists but has no ai-memory markers, append the markered_block with one blank line of separation from existing content.",
                 "Install each managed_skills item under the selected skill root from target_hints using its relative_path, for example .claude/skills/<relative_path> or .agents/skills/<relative_path>.",

@@ -205,15 +205,22 @@ fn merge_instructions_block(existing: &str, block: &str) -> String {
 }
 
 fn strip_legacy_orphan_tail<'a>(block: &str, tail: &'a str) -> &'a str {
-    if let Some(rest) = tail.strip_prefix(LEGACY_ORPHAN_TAIL_LF) {
-        return rest;
+    let dynamic_orphan = legacy_orphan_tail(block);
+    let mut rest = tail;
+    loop {
+        if let Some(stripped) = rest.strip_prefix(LEGACY_ORPHAN_TAIL_LF) {
+            rest = stripped;
+        } else if let Some(stripped) = rest.strip_prefix(LEGACY_ORPHAN_TAIL_CRLF) {
+            rest = stripped;
+        } else if let Some(orphan) = dynamic_orphan
+            && !orphan.is_empty()
+            && let Some(stripped) = rest.strip_prefix(orphan)
+        {
+            rest = stripped;
+        } else {
+            return rest;
+        }
     }
-    if let Some(rest) = tail.strip_prefix(LEGACY_ORPHAN_TAIL_CRLF) {
-        return rest;
-    }
-    legacy_orphan_tail(block)
-        .and_then(|orphan| tail.strip_prefix(orphan))
-        .unwrap_or(tail)
 }
 
 fn legacy_orphan_tail(block: &str) -> Option<&str> {
@@ -312,6 +319,16 @@ mod tests {
     fn merge_repairs_exact_legacy_orphan_tail() {
         let block = full_block();
         let legacy_corrupt = format!("# Title\n\n{block}{LEGACY_ORPHAN_TAIL_LF}More notes.\n");
+        let out = merge_instructions_block(&legacy_corrupt, &block);
+        assert_eq!(out, format!("# Title\n\n{block}More notes.\n"));
+    }
+
+    #[test]
+    fn merge_repairs_repeated_legacy_orphan_tails() {
+        let block = full_block();
+        let legacy_corrupt = format!(
+            "# Title\n\n{block}{LEGACY_ORPHAN_TAIL_LF}{LEGACY_ORPHAN_TAIL_CRLF}More notes.\n"
+        );
         let out = merge_instructions_block(&legacy_corrupt, &block);
         assert_eq!(out, format!("# Title\n\n{block}More notes.\n"));
     }
