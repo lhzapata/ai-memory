@@ -1,7 +1,7 @@
 # Admission webhooks: pre-persistence HTTP hooks
 
 > Operator-configured HTTP hooks invoked on the engine's write path
-> (`Wiki::write_page`, `delete_page`, `purge_project`, `move_project`)
+> (`Wiki::write_page`, `delete_page`, `purge_project`, `purge_workspace`, `move_project`)
 > just before the durable mutation commits. Write hooks can mutate the page
 > (return a new frontmatter / body); delete/purge/move hooks are notifications
 > that can observe, mirror, or reject. Sourced from
@@ -50,6 +50,11 @@ Webhooks fire on these `op` values today (extensible enum):
   `remove_dir_all`, routed from `/admin/purge-project`). Carries the
   project in `ctx`, **no** page path; fired before the directory is
   removed so a mirror can drop the project.
+- `purge_workspace` — a whole workspace is purged (routed from
+  `/admin/delete-workspace`). Carries the workspace in `ctx.workspace`, leaves
+  `ctx.project` empty, and has **no** page path; fired before SQL/file
+  destruction for reject-policy admission and dispatched again to non-blocking
+  observers after durable work.
 - `move_project` — a whole project is moved between workspaces without
   changing `project_id` (fresh-destination true move). Carries the source
   project in `ctx.workspace` / `ctx.project`, destination names in
@@ -57,12 +62,13 @@ Webhooks fire on these `op` values today (extensible enum):
   fired before the directory rename + DB re-stamp so a mirror can rename or
   reject the project move.
 
-`delete` / `purge_project` / `move_project` are notifications — there is no
+`delete` / `purge_project` / `purge_workspace` / `move_project` are notifications — there is no
 body to mutate; a `Reject`-policy webhook still aborts the operation
 (admission fires BEFORE the SQL destruction in both the `/admin/purge-project`
-and `/admin/move-project` copy-purge paths, so reject leaves the source
-intact). Each webhook opts into the ops it cares about via `events`; the
-chain checks the op against `WebhookConfig::events` before dispatching.
+and `/admin/delete-workspace` paths, and before source teardown in
+`/admin/move-project` copy-purge paths, so reject leaves the source intact).
+Each webhook opts into the ops it cares about via `events`; the chain checks the
+op against `WebhookConfig::events` before dispatching.
 
 A copy-purge `/admin/move-project` fires **two** webhook events from
 one request: one or more `write_page` notifications as the pages copy
@@ -70,6 +76,17 @@ into the destination, then one terminal `purge_project` notification
 when the source is torn down. The `purge_project` event carries
 `partial_failure: true` if the SQL purge committed but the on-disk
 dir removal failed afterwards.
+
+`/admin/delete-workspace` emits `purge_workspace`. Its final async observer
+notification carries `partial_failure: true` if the SQL workspace cascade
+committed but `<wiki_root>/<workspace_id>` could not be removed.
+
+During the copy leg, the engine skips only the webhook named exactly
+`contributors`. Move copies preserve page frontmatter verbatim, including any
+existing `contributors` list, so re-running that enrichment hook for every page
+adds bulk-move latency without changing the copied page. Other `write_page`
+webhooks, such as a `git-mirror`, still run normally for each copied page; the
+terminal `purge_project` notification is unchanged.
 
 ### What does NOT fire the chain (by design)
 
@@ -84,6 +101,9 @@ dir removal failed afterwards.
   do. (Only `purge_project` removes files in bulk.)
 - **`rename-project`** — a `projects.name` column update; the on-disk path
   is the stable UUID, so no file moves and nothing to propagate.
+- **`rename-workspace`** — a `workspaces.name` column update plus refreshed
+  `_meta.md` manifests; workspace paths are stable UUIDs, so no file move
+  notification is needed.
 - **External / manual edits on disk** — reconciled by the watcher, not the
   admission chain (the chain is for the engine's own write path).
 
@@ -94,7 +114,7 @@ dir removal failed afterwards.
 ```http
 POST <webhook.url>
 Content-Type: application/json
-X-Memory-Op: write_page | consolidate | delete | purge_project | move_project
+X-Memory-Op: write_page | consolidate | delete | purge_project | purge_workspace | move_project
 ```
 
 ```jsonc
@@ -116,8 +136,8 @@ X-Memory-Op: write_page | consolidate | delete | purge_project | move_project
       "client": "72836f52-...",              // DCR client UUID
       "session_id": "019e6d-..."
     },
-    "op": "write_page",                      // write_page | consolidate | delete | purge_project | move_project
-    "partial_failure": true                  // purge_project only, and ONLY when set
+    "op": "write_page",                      // write_page | consolidate | delete | purge_project | purge_workspace | move_project
+    "partial_failure": true                  // purge_project/purge_workspace only, and ONLY when set
                                              //   (skipped on the wire when false).
                                              //   true → the DB rows were purged but
                                              //   `remove_project_dir` failed afterwards;
