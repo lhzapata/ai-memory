@@ -57,19 +57,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostCompaction`, `Stop`,
   and `SessionEnd`; `PostCompaction` is stored as a dedicated observation kind
   and captures Devin's `summary` field. Devin does not expose subagent hook
-  events, so subagent capture is not installed for Devin.
+  events, so subagent capture is not installed for Devin ([#178]).
 - Managed Agent Skills can now target Devin: project installs use
   `.devin/skills`; global installs use `%APPDATA%\devin\skills` on Windows and
-  `~/.devin/skills` elsewhere.
+  `~/.devin/skills` elsewhere ([#178]).
 - The store migration set now admits `devin` as a persisted
   `sessions.agent_kind`, preserving the same workspace/project invariants as
-  the other supported agents.
+  the other supported agents ([#178]).
 
 ### Fixed
 - `install-mcp` and `install-hooks` now honor an explicit `--server-url` even
   when it matches the compiled default. Previously that value was
   indistinguishable from "flag omitted" and could be overridden by
-  `AI_MEMORY_SERVER_URL`, which could write config for the wrong local server.
+  `AI_MEMORY_SERVER_URL`, which could write config for the wrong local server
+  ([#178]).
 - Devin hook capture now derives `cwd` when the native payload omits it:
   payload `cwd` still wins, followed by `DEVIN_PROJECT_DIR`, then the hook
   process working directory. This keeps real Devin `SessionStart` /
@@ -77,7 +78,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Payloads without a `session_id` are bridged the same way: a per-host id is
   minted at `SessionStart`, reused for later events, and cleared at
   `SessionEnd`; set `AI_MEMORY_SESSION_ID` in the hook environment to pin an
-  externally managed run id. A payload-supplied id always wins.
+  externally managed run id. A payload-supplied id always wins ([#178]).
 
 ## [1.12.0] - 2026-07-12
 
