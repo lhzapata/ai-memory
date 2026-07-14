@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- New read-only admin endpoint `GET /admin/projects`: the authoritative
+  `(workspace, project)` inventory with page counts and last-updated
+  timestamps. Gives dashboards, exports, and backup/mirror tooling a
+  first-class list to reconcile against — a mirror directory whose project
+  no longer appears here is an orphan and can be pruned. Root-only in
+  multi-user mode, like every `/admin/*` route ([#180]).
 - `memory_delete_page` / admin `delete-page` now write one attributed
   `audit_log` row pointing at the deleted page id, in the same transaction
   as the delete — completing the "who deleted the gotcha page about X?"
