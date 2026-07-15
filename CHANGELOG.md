@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- One-shot client commands (`rename-project`, `status`, `write-page`, …) no
+  longer print the "cannot write log files … falling back" warning when the
+  log directory is unwritable — they still degrade to temp/stderr logging
+  silently. The warning was written for the long-running server (where an
+  operator should know persistent logs moved) but fired on every Docker
+  thin-client invocation too, where it read as a problem with the command
+  itself and its sandbox hint was misleading. `serve` still warns, with
+  clearer wording that names both the intended and the fallback location.
+
 ## [1.14.0] - 2026-07-15
 
 ### Added
