@@ -4,8 +4,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use ai_memory_core::routing_skills::{
-    AGENTS_SKILL_DIR, CLAUDE_SKILL_DIR, DEVIN_SKILL_DIR, MANAGED_MARKER, MANAGED_SKILLS,
-    ManagedSkill, SKILLS_DIR,
+    AGENTS_SKILL_DIR, CLAUDE_SKILL_DIR, DEVIN_SKILL_DIR, GROK_SKILL_DIR, MANAGED_MARKER,
+    MANAGED_SKILLS, ManagedSkill, SKILLS_DIR,
 };
 use anyhow::{Context, Result, bail};
 
@@ -143,6 +143,16 @@ fn resolve_target_roots_for_platform(
                 platform,
             )?]
         }
+        InstallSkillsAgent::Grok => {
+            vec![agent_root(
+                args.scope,
+                SkillRootKind::Grok,
+                cwd,
+                home,
+                appdata,
+                platform,
+            )?]
+        }
         InstallSkillsAgent::Both => vec![
             agent_root(
                 args.scope,
@@ -187,6 +197,7 @@ enum SkillRootKind {
     Claude,
     Agents,
     Devin,
+    Grok,
 }
 
 fn agent_root(
@@ -216,6 +227,7 @@ fn agent_root(
         SkillRootKind::Claude => CLAUDE_SKILL_DIR,
         SkillRootKind::Agents => AGENTS_SKILL_DIR,
         SkillRootKind::Devin => DEVIN_SKILL_DIR,
+        SkillRootKind::Grok => GROK_SKILL_DIR,
     };
     Ok(base.join(agent_dir).join(SKILLS_DIR))
 }
@@ -353,6 +365,14 @@ mod tests {
         .unwrap();
         assert_eq!(root_names(&project_devin), ["/repo/.devin/skills"]);
 
+        let project_grok = resolve_target_roots(
+            &args(InstallSkillsScope::Project, InstallSkillsAgent::Grok),
+            cwd,
+            Some(home),
+        )
+        .unwrap();
+        assert_eq!(root_names(&project_grok), ["/repo/.grok/skills"]);
+
         let project_both = resolve_target_roots(
             &args(InstallSkillsScope::Project, InstallSkillsAgent::Both),
             cwd,
@@ -382,6 +402,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(root_names(&global_devin), ["/home/alice/.devin/skills"]);
+
+        let global_grok = resolve_target_roots(
+            &args(InstallSkillsScope::Global, InstallSkillsAgent::Grok),
+            cwd,
+            Some(home),
+        )
+        .unwrap();
+        assert_eq!(root_names(&global_grok), ["/home/alice/.grok/skills"]);
     }
 
     #[test]

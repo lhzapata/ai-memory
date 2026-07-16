@@ -116,19 +116,21 @@ To refresh only the managed Agent Skills:
 ai-memory install-skills
 ai-memory install-skills --scope global --agent agents
 ai-memory install-skills --scope global --agent devin
+ai-memory install-skills --scope global --agent grok
 ai-memory install-skills --agent both --print
 ai-memory install-skills --target-dir .custom/skills --force
 ```
 
 For Devin, project-local skills are installed under `.devin/skills`. Global
 Devin installs use `%APPDATA%\devin\skills` on Windows and `~/.devin/skills`
-on non-Windows systems.
+on non-Windows systems. For Grok Build CLI, project-local skills go under
+`.grok/skills` and global under `~/.grok/skills`.
 
 Project-local skill roots are `.claude/skills` for Claude-compatible installs,
-`.agents/skills` for cross-client installs, and `.devin/skills` for Devin
-installs. Global Claude/Agents roots are `~/.claude/skills` and
+`.agents/skills` for cross-client installs, `.devin/skills` for Devin, and
+`.grok/skills` for Grok. Global Claude/Agents roots are `~/.claude/skills` and
 `~/.agents/skills`; global Devin roots are platform-specific as described
-above. `--target-dir` points at an explicit skill root and bypasses scope/agent
+above; global Grok is `~/.grok/skills`. `--target-dir` points at an explicit skill root and bypasses scope/agent
 inference. `--print` previews target paths and `SKILL.md` contents. `--force`
 allows replacement of unmanaged same-name skills; without it, user-authored
 skills are preserved. Uninstall removes ai-memory-managed skills from the

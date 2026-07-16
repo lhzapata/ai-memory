@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Grok Build CLI is now a first-class MCP client as well as a hook agent:
+  `install-mcp --client grok` renders and `--apply` merges a native HTTP
+  entry into `~/.grok/config.toml` (`[mcp_servers.ai-memory]` with
+  `url` / `enabled` / `[mcp_servers.ai-memory.headers]` — not Codex's
+  `http_headers` key). `install-hooks --agent grok` reuses that entry to
+  infer server URL and bearer token; `uninstall` strips the MCP table;
+  `setup-agent --agent grok` prints the companion `install-mcp` tip.
+  Managed routing skills can target `.grok/skills` / `~/.grok/skills` via
+  `install-skills --agent grok` and `memory_install_self_routing`
+  `target_hints`. Lifecycle capture was already present; handoff injection
+  remains unavailable because Grok ignores SessionStart stdout — recover
+  via MCP `memory_handoff_accept`.
+
 ### Changed
 - One-shot client commands (`rename-project`, `status`, `write-page`, …) no
   longer print the "cannot write log files … falling back" warning when the

@@ -101,7 +101,7 @@ metadata.
 > **One-shot tip:** every snippet below is also reachable from the
 > CLI:
 > ```bash
-> ai-memory install-mcp --client gemini-cli   # or cursor / claude-desktop / openclaw / omp / pi / antigravity-cli / vscode-copilot
+> ai-memory install-mcp --client gemini-cli   # or cursor / claude-desktop / openclaw / omp / pi / antigravity-cli / grok / vscode-copilot
 > ```
 
 ---
@@ -446,6 +446,56 @@ ai-memory's subagent events). Zero discards `sessionStart` hook stdout, so
 capture and session-end handoff *creation* work, but handoff *injection*
 does not — ask Zero to call `memory_handoff_accept` at the start of a
 resumed session.
+
+## Grok Build CLI
+
+**Status:** ✅ MCP supported. ✅ Lifecycle hooks supported via
+`ai-memory install-hooks --agent grok --apply`. ❌ No automatic handoff
+injection (Grok ignores SessionStart stdout — same policy as Zero).
+
+**Config file:** `~/.grok/config.toml` (user scope). Project scope is
+`<repo>/.grok/config.toml`; pass `--config-file` if you want the
+installer to write there.
+
+```bash
+ai-memory install-mcp --client grok --apply \
+    --server-url "http://homelab:49374/mcp" --auth-token "$TOKEN"
+```
+
+which merges:
+
+```toml
+[mcp_servers.ai-memory]
+url = "http://homelab:49374/mcp"
+enabled = true
+
+[mcp_servers.ai-memory.headers]
+Authorization = "Bearer <token>"
+```
+
+**Schema notes (do not confuse with Codex):**
+- Grok uses `[mcp_servers.<name>.headers]`; Codex uses `http_headers`.
+- `enabled = true` is the documented per-server toggle.
+- String fields support `${VAR}` expansion, so you can write
+  `Authorization = "Bearer ${AI_MEMORY_AUTH_TOKEN}"` instead of embedding
+  the token.
+- CLI alternative: `grok mcp add --transport http ai-memory <url>` (plus
+  `--header` for bearer auth).
+
+Lifecycle capture is separate: `ai-memory install-hooks --agent grok
+--apply` writes `~/.grok/hooks/ai-memory.json` (Grok discovers every
+`~/.grok/hooks/*.json`, so third-party hook files stay untouched). Events
+mirror Claude Code's vocabulary (`SessionStart`, `UserPromptSubmit`,
+`PreToolUse`, `PostToolUse`, `PreCompact`, `Stop`, `SessionEnd`,
+`SubagentStart`, `SubagentStop`) with a Grok-specific script bundle /
+native `ai-memory hook --event … --agent grok` commands. Session-end
+handoff *creation* works; handoff *injection* does not — ask Grok to
+call `memory_handoff_accept` (or install the managed routing skills under
+`.grok/skills` / `~/.grok/skills`) at the start of a resumed session.
+
+Grok can also load MCP from Claude Code / Cursor compat sources when those
+compat flags are enabled, but first-party `install-mcp --client grok` is
+the supported path for uninstall isolation and hooks URL inference.
 
 ## Devin CLI
 

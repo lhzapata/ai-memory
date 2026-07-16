@@ -368,7 +368,9 @@ fn infer_installed_mcp_config(agent: AgentChoice) -> Option<InferredMcpConfig> {
         McpClient::ClaudeCode => {
             infer_json_mcp_config(&content, &["mcpServers", "ai-memory"], "url")
         }
-        McpClient::Codex => infer_codex_mcp_config(&content),
+        // Codex uses `http_headers`; Grok uses `headers`. The shared TOML
+        // inferencer accepts both.
+        McpClient::Codex | McpClient::Grok => infer_toml_mcp_config(&content),
         McpClient::OpenCode => infer_json_mcp_config(&content, &["mcp", "ai-memory"], "url"),
         McpClient::Cursor => infer_json_mcp_config(&content, &["mcpServers", "ai-memory"], "url"),
         McpClient::GeminiCli => {
@@ -405,9 +407,11 @@ fn mcp_client_for_agent(agent: AgentChoice) -> Option<McpClient> {
         AgentChoice::Openclaw => Some(McpClient::Openclaw),
         AgentChoice::AntigravityCli => Some(McpClient::AntigravityCli),
         AgentChoice::Zero => Some(McpClient::Zero),
-        // Grok and Devin manage their own MCP config under ~/.grok/ and ~/.devin/;
-        // we don't auto-infer a hook server URL from it.
-        AgentChoice::Pi | AgentChoice::Grok | AgentChoice::Devin => None,
+        AgentChoice::Grok => Some(McpClient::Grok),
+        AgentChoice::Devin => Some(McpClient::Devin),
+        // Pi bridges MCP through its generated extension, not a native
+        // mcp.json the installer can scrape.
+        AgentChoice::Pi => None,
     }
 }
 
@@ -436,12 +440,14 @@ fn infer_json_mcp_config(
     })
 }
 
-fn infer_codex_mcp_config(content: &str) -> Option<InferredMcpConfig> {
+/// Infer hook server URL + bearer from a TOML `[mcp_servers.ai-memory]`
+/// entry (Codex `http_headers` or Grok `headers`).
+fn infer_toml_mcp_config(content: &str) -> Option<InferredMcpConfig> {
     let doc: toml_edit::DocumentMut = content.parse().ok()?;
     // `toml_edit::Item`'s `Index` impl panics on missing keys, so this
     // walks the table chain with `.get()` instead. A user with
     // `[mcp_servers.context7]` but no `[mcp_servers.ai-memory]` is a
-    // perfectly valid hooks-only Codex setup (issue #53) — return None
+    // perfectly valid hooks-only Codex/Grok setup (issue #53) — return None
     // rather than abort the whole install with a stack trace.
     let server = doc.get("mcp_servers")?.get("ai-memory")?;
 
@@ -3289,11 +3295,31 @@ mod tests {
 
     #[test]
     fn codex_mcp_inference_accepts_block_form_config() {
-        let inferred = infer_codex_mcp_config(
+        let inferred = infer_toml_mcp_config(
             r#"[mcp_servers.ai-memory]
 url = "http://homelab:49374/mcp"
 
 [mcp_servers.ai-memory.http_headers]
+Authorization = "Bearer secret-token"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            inferred.hook_server_url.as_deref(),
+            Some("http://homelab:49374")
+        );
+        assert_eq!(inferred.auth_token.as_deref(), Some("secret-token"));
+    }
+
+    #[test]
+    fn grok_mcp_inference_accepts_headers_key() {
+        let inferred = infer_toml_mcp_config(
+            r#"[mcp_servers.ai-memory]
+url = "http://homelab:49374/mcp"
+enabled = true
+
+[mcp_servers.ai-memory.headers]
 Authorization = "Bearer secret-token"
 "#,
         )
@@ -3314,7 +3340,7 @@ Authorization = "Bearer secret-token"
     /// server — must return None, not abort the whole install.
     #[test]
     fn codex_mcp_inference_returns_none_when_ai_memory_entry_missing() {
-        let inferred = infer_codex_mcp_config(
+        let inferred = infer_toml_mcp_config(
             r#"[mcp_servers.context7]
 url = "http://localhost:9000/mcp"
 
@@ -3334,7 +3360,7 @@ args = ["node-repl"]
     /// None rather than panic on the first index.
     #[test]
     fn codex_mcp_inference_returns_none_when_no_mcp_servers_table() {
-        let inferred = infer_codex_mcp_config(
+        let inferred = infer_toml_mcp_config(
             r#"# fresh codex config
 model = "gpt-5"
 "#,
@@ -3345,7 +3371,7 @@ model = "gpt-5"
     /// And the empty-file edge case the parser still accepts.
     #[test]
     fn codex_mcp_inference_returns_none_for_empty_doc() {
-        assert!(infer_codex_mcp_config("").is_none());
+        assert!(infer_toml_mcp_config("").is_none());
     }
 
     /// An ai-memory entry that exists but ships neither a `url` nor an
@@ -3354,7 +3380,7 @@ model = "gpt-5"
     /// present but unhelpful" — both yield None, neither panics.
     #[test]
     fn codex_mcp_inference_returns_none_for_bare_ai_memory_entry() {
-        let inferred = infer_codex_mcp_config(
+        let inferred = infer_toml_mcp_config(
             r#"[mcp_servers.ai-memory]
 # intentionally empty — no url, no headers.
 "#,
