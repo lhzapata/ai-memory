@@ -24,6 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   via MCP `memory_handoff_accept`.
 
 ### Changed
+- `init`-generated token peppers no longer make operational `/admin/*` routes
+  root-only before the first user is created. Admin mode now switches
+  immediately and fail-closed from a store-backed user-row check; expired users
+  still count. Servers refuse startup when user rows exist but either the
+  non-empty `[auth].token_pepper` or static `[auth].bearer_token` is missing or
+  blank, preventing accidental anonymous admin reopening ([#191]).
 - `install-hooks --agent devin` now infers the server URL and bearer token from
   `~/.devin/config.json` when flags and environment settings are absent, keeping
   hooks aligned with an existing Devin MCP registration.

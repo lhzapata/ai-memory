@@ -11,8 +11,8 @@ there is no per-page RBAC, no per-user data scoping, no group
 permissions. What multi-user mode adds is *who-did-this*: every write
 attributes to a named user, audit-log rows carry that identity, and the
 web UI can show "Last edited by Alice Smith" instead of the anonymous
-default. Every `/admin/*` endpoint stays root-only once multi-user mode
-is configured, including read-only status/search/read-page helpers.
+default. Every `/admin/*` endpoint stays root-only once at least one user
+row exists, including read-only status/search/read-page helpers.
 
 If you run ai-memory alone, you can skip this page — your install
 keeps working unchanged.
@@ -31,10 +31,8 @@ You probably want multi-user mode when:
 
 You probably **don't** need it when:
 
-- You're the sole human user of your install. Single-user mode
-  (`[auth].bearer_token` set, no `[auth].token_pepper`) is what
-  the project has shipped since v0.1 and continues to work
-  identically.
+- You're the sole human user of your install. Single-user mode (no user rows)
+  remains compatible whether or not `init` has generated `[auth].token_pepper`.
 - You need permissions / access control. v1 of ai-memory does
   not implement RBAC by design (see
   [`design-decisions.md`](design-decisions.md) §13). Attribution
@@ -101,7 +99,14 @@ table useless to an offline attacker; an attacker with both the
 DB and the config has tokens at their disposal anyway, so the
 pepper's job is closed by the file-permission boundary.
 
-Restart `ai-memory serve` for the changes to take effect.
+`init` creates the pepper before any users exist. Until the first user is
+added, operational admin endpoints retain single-user compatibility; creating
+that first user switches them to root-only immediately, without a restart.
+Expired user rows still keep admin mode root-only. If a database has users but
+either the pepper or static root bearer is missing or blank, `serve` refuses
+startup. Restore both original secrets from configuration backup (or set the
+root bearer from the secret manager) rather than removing users; the root token
+is required to administer the existing users.
 
 ### 2. Add another user
 

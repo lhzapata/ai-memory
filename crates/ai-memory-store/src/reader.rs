@@ -4327,6 +4327,16 @@ impl ReaderPool {
     pub async fn list_users(&self) -> StoreResult<Vec<User>> {
         self.with_conn(crate::users::list_users).await
     }
+
+    /// Return whether any user row exists, including expired users. This cheap
+    /// predicate is used at the admin authorization boundary to switch from
+    /// bootstrap compatibility mode to root-only multi-user administration.
+    ///
+    /// # Errors
+    /// Propagates any SQL or pool error so callers can fail closed.
+    pub async fn users_exist(&self) -> StoreResult<bool> {
+        self.with_conn(crate::users::users_exist).await
+    }
 }
 
 /// Map a `(workspace, project, path, title, kind)` row to a [`HealthPage`].
