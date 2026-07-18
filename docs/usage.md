@@ -4,6 +4,15 @@ This page covers what happens after ai-memory is installed: handoffs,
 compaction recovery, proactive memory queries, the web UI, and the
 managed routing snippet + Agent Skills package.
 
+## Capture exclusions
+
+To keep recognized file-tool events under private paths out of ai-memory before
+they are spooled or sent, configure `[capture] ignore_paths` in the nearest
+`.ai-memory.toml`. The canonical grammar, limitations, support matrix, refresh
+requirements, and safe local `--check-capture` command are in
+[the marker-file reference](marker-file.md#capture-exclusions). This is not a
+general prompt/output DLP filter.
+
 ## Cross-agent handoff
 
 You normally do not create handoffs by hand. With lifecycle hooks

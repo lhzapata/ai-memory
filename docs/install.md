@@ -368,6 +368,16 @@ then stages runnable copies under `~/.local/share/ai-memory/hooks/<agent>/` so
 the agent can execute files owned by your user. Re-run `install-hooks --apply`
 after package upgrades to refresh those staged copies.
 
+### Capture-policy capability and refresh
+
+`[capture] ignore_paths` is enforced only by native `ai-memory hook` commands
+and generated OpenCode/OMP/Pi/OpenClaw integrations. Local installers select
+native commands where supported; legacy `.sh`/`.ps1` hooks and remote-only or
+Docker script bundles do not enforce it. Re-run `install-hooks --agent <agent>
+--apply` or refresh/reinstall generated plugins after upgrading; installer
+capability output reflects the selected integration. See the canonical
+[capture exclusions reference](marker-file.md#capture-exclusions).
+
 Native `ai-memory hook --event ...` commands spool events locally. Session start
 does a short bounded cleanup drain before fetching a handoff; cancellation-prone
 boundary events (`stop`, `pre-compact`, and `session-end`) start a detached
@@ -492,16 +502,14 @@ Claude Desktop is MCP-only today. Claude Code, Codex, Devin CLI, OpenCode,
 OMP, Cursor, Gemini CLI, Antigravity CLI, Grok Build CLI, and OpenClaw have lifecycle capture paths through
 `install-hooks`.
 
-> **Two-step hook install pattern.** Claude Code, Codex, Cursor,
-> Gemini CLI, Antigravity CLI, Grok Build CLI, and Devin CLI use shell/PowerShell hook scripts: (1) `docker cp` the
-> bundled scripts to your home dir, (2) `docker run --rm install-hooks`
-> to render the config snippet.
-> On native Windows, Claude Code is the exception to the PowerShell default:
-> it uses Claude exec form (`command` = real `ai-memory.exe`, `args` = argv
-> tokens for `hook --event ...`) by default. Set
-> `AI_MEMORY_HOOK_PLATFORM=windows-bash` before `install-hooks` to opt back into
-> Git Bash `bash -c` commands for the `.sh` scripts, including for older Claude
-> Code builds that do not support exec form.
+> **Hook install pattern.** Local supported profiles default to host-native
+> commands. Claude Code may use its supported Windows exec form (`command` =
+> real `ai-memory.exe`, `args` = argv tokens for `hook --event ...`); other
+> agents use native single command strings according to their hook schema.
+> PowerShell/Git Bash script bundles are compatibility fallbacks and do not
+> enforce capture-policy v1. Remote-only/Docker script installs still use the
+> two-step path: (1) `docker cp` bundled scripts to your home dir, (2)
+> `docker run --rm install-hooks` renders the config snippet.
 > OpenClaw, OpenCode, and OMP are different: they use generated
 > TypeScript plugin/extension files, so no shell-script extraction is
 > needed for those clients.

@@ -76,6 +76,9 @@ pub fn run(config: &Config, args: SetupAgentArgs) -> Result<()> {
     let Some(agent_sub) = args.agent.script_hook_subdir() else {
         bail!("internal: generated integration should have returned before staging hooks")
     };
+    eprintln!(
+        "[ai-memory] setup-agent emits shell/PowerShell hook bundles for {agent_sub}; these remote/compatibility bundles do not enforce capture-policy capability v1. Install local native hooks instead when policy enforcement is required."
+    );
 
     let source = resolve_source(args.source.as_deref(), agent_sub)?;
     let dest_dir = args.to.join(agent_sub);
@@ -217,6 +220,12 @@ fn emit_extension_setup_hint(args: &SetupAgentArgs) -> Result<()> {
         other => bail!("internal: {other:?} is not a generated-integration agent"),
     };
     println!("# {label} uses a TypeScript extension/plugin, not extracted shell scripts.");
+    println!(
+        "# Capture-policy capability v1 requires a freshly generated integration; re-run --apply after upgrades."
+    );
+    println!(
+        "# Legacy shell/PowerShell and remote-only paths are unsupported compatibility modes."
+    );
     println!("# Install it directly instead:");
     println!("ai-memory install-hooks --agent {agent} --apply \\");
     if args.auth_token.is_some() {

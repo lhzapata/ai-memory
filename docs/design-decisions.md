@@ -114,6 +114,18 @@ Three capture surfaces, in priority order:
 
 3. **Manual MCP tool** (`memory_remember`) - only for ad-hoc explicit captures from the user ("remember this"). Not the primary path; not what the agent reaches for by default.
 
+### Capture-policy boundary (#194)
+
+The nearest `.ai-memory.toml` may use `[capture] ignore_paths` to exclude
+recognized file-tool events before client spool or transport. This is a strict,
+schema-specific lexical boundary, not a general content or DLP filter: private
+patterns and candidates never leave the client, but shell/patch text, aliases,
+and non-path-attributable bodies remain outside its scope. The authoritative
+grammar, limits, supported integrations, and `--check-capture` affordance are
+in [the marker-file reference](marker-file.md#capture-exclusions). It adds no
+MCP tool and needs no DB migration; new-client/old-server is safe, while old
+clients retain their previous capture behavior.
+
 ## 7. Memory model (temporal)
 
 Adopt agentmemory's tier model **but** keep the surface narrow:

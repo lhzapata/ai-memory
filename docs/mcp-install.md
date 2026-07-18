@@ -20,16 +20,23 @@ This page documents how to register ai-memory as an MCP server with
 agent CLIs beyond the README quick start.
 
 Claude Code, OpenAI Codex, Devin CLI, Cursor, Gemini CLI, Antigravity CLI, Grok Build CLI, Zero, OpenClaw, OpenCode, and
-OMP have automatic capture integrations (shell/PowerShell hooks for
-Claude Code / Codex / Devin CLI / Cursor / Gemini CLI / Antigravity CLI / Grok Build CLI, TypeScript plugin/extension
-files for OpenClaw / OpenCode / OMP) and are covered in the
-[main README](../README.md#quick-start). On native Windows, Claude Code uses
-Git Bash `.sh` hooks rather than the PowerShell default used by other
-script-hook agents. Grok and Zero capture lifecycle events, but both ignore
+OMP have automatic capture integrations (host-native commands for supported
+local profiles, plus generated TypeScript plugin/extension files for OpenClaw /
+OpenCode / OMP) and are covered in the [main README](../README.md#quick-start).
+Claude Code may use its supported Windows exec form; other agents use native
+single command strings according to their hook schema. PowerShell/Git Bash
+script bundles are compatibility fallbacks and do not enforce capture-policy
+v1. Grok and Zero capture lifecycle events, but both ignore
 SessionStart stdout, so ai-memory does not auto-inject handoffs for them.
 SessionStart handoff injection works only for clients that consume startup-hook
 stdout (or their equivalent context-injection result); Grok and Zero must call
 `memory_handoff_accept` when resuming.
+
+Capture exclusions are separate from MCP registration. Native hook commands and
+generated OpenCode/OMP/Pi/OpenClaw integrations enforce `[capture]
+ignore_paths`; legacy shell/PowerShell and remote-only/Docker script bundles do
+not. Reinstall/refresh an existing hook or plugin to gain it; see
+[Capture exclusions](marker-file.md#capture-exclusions).
 
 Claude Desktop and VS Code Copilot are **MCP-only** here: they expose
 long-term memory to their LLMs via ai-memory's MCP tools

@@ -52,6 +52,10 @@ from hook paths.
    minute-based env vars.
    Agent hot paths never block on the network; saturated servers return HTTP
    429 instead of queueing unbounded work.
+   For supported native commands and generated OpenCode/OMP/Pi/OpenClaw
+   integrations, the nearest-marker capture policy runs first: a dropped
+   recognized file-tool event never enters spool, queue, transport, logs, or
+   storage. See [Capture exclusions](marker-file.md#capture-exclusions).
 2. Server's hook router sanitises the payload (the only path from
    untrusted text into the store), assigns an [`ObservationKind`], and
    enqueues a `WriteCmd` to the writer actor. `log.md` gets an

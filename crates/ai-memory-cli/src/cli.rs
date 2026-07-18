@@ -1245,6 +1245,9 @@ pub struct HookArgs {
     /// marker does not pin its own `project_strategy`.
     #[arg(long, value_enum)]
     pub project_strategy: Option<ProjectStrategyArg>,
+    /// Inspect capture policy without spooling, draining, or contacting the server.
+    #[arg(long)]
+    pub check_capture: bool,
 }
 
 /// Arguments for hidden `hook-drain`.
