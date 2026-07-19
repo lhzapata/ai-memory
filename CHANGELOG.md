@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.15.0] - 2026-07-19
+
 ### Added
 - Tool lifecycle capture now records safe metadata summaries for the closed
   Claude Code, OpenCode, Pi, and Antigravity schemas: canonical family,
@@ -2005,7 +2007,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Consolidator used server startup default project instead of the
   session's actual project.
 
-[Unreleased]: https://github.com/akitaonrails/ai-memory/compare/v1.14.0...HEAD
+[Unreleased]: https://github.com/akitaonrails/ai-memory/compare/v1.15.0...HEAD
+[1.15.0]: https://github.com/akitaonrails/ai-memory/releases/tag/v1.15.0
 [1.14.0]: https://github.com/akitaonrails/ai-memory/releases/tag/v1.14.0
 [1.13.0]: https://github.com/akitaonrails/ai-memory/releases/tag/v1.13.0
 [1.12.0]: https://github.com/akitaonrails/ai-memory/releases/tag/v1.12.0
