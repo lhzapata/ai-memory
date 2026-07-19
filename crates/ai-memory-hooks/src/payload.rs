@@ -571,11 +571,9 @@ fn best_title_hint(event: HookEvent, raw: &serde_json::Value) -> Option<String> 
     match event {
         HookEvent::SessionStart => extract_string(raw, &["model", "title"]),
         HookEvent::UserPrompt => {
-            // `extract_content` (not `extract_string`): Kimi Code sends
-            // `prompt` as content blocks (`[{"type":"text","text":...}]`),
-            // which only `value_to_text` flattens — plain-string agents
-            // (Claude Code et al.) get the identical value back, so this
-            // widens coverage without changing their behaviour.
+            // Kimi Code sends `prompt` as content blocks
+            // (`[{"type":"text","text":...}]`); `extract_content` flattens
+            // them and returns identical values for plain-string agents.
             extract_content(raw, &["prompt", "message", "text"]).map(|s| truncate_for_title(&s))
         }
         HookEvent::PreToolUse | HookEvent::PostToolUse => {
@@ -1293,10 +1291,8 @@ mod tests {
         assert!(title.ends_with('…'));
     }
 
-    /// Kimi Code sends `prompt` as Anthropic-style content blocks, not a
-    /// plain string. The title hint must flatten them exactly like the
-    /// body excerpt does, or the observation title degrades to the bare
-    /// event kind while the body holds the actual prompt.
+    /// Kimi Code's content-block `prompt` must flatten into the title
+    /// exactly like the body excerpt does.
     #[test]
     fn user_prompt_title_flattens_kimi_code_content_blocks() {
         let q = HookQuery {

@@ -62,8 +62,7 @@ fn post(body: &'static str) -> Request<Body> {
     post_to("/mcp", body)
 }
 
-/// Same as [`post`] but against an explicit URI, so tests can carry the
-/// `?flavor=moonshot` marker Kimi Code's installed URL uses.
+/// [`post`] against an explicit URI (tests carrying `?flavor=moonshot`).
 fn post_to(uri: &str, body: &'static str) -> Request<Body> {
     Request::builder()
         .method("POST")
@@ -167,9 +166,7 @@ async fn stateful_tools_call_without_session_is_rejected() {
     );
 }
 
-/// Extract `memory_read_page`'s inputSchema from a tools/list JSON-RPC
-/// response body — the one tool whose root `anyOf` (issue #155) decides
-/// whether a Moonshot-flavored client can list tools at all.
+/// Pull `memory_read_page`'s inputSchema from a tools/list response body.
 fn read_page_input_schema(body: &str) -> serde_json::Value {
     let json: serde_json::Value = serde_json::from_str(body)
         .unwrap_or_else(|e| panic!("tools/list response must be JSON, got: {body}\nerr: {e}"));
@@ -185,12 +182,9 @@ fn read_page_input_schema(body: &str) -> serde_json::Value {
     .clone()
 }
 
-/// The real Kimi Code flow: `initialize` and `tools/list` as independent
-/// POSTs (stateless — no session id) against `/mcp?flavor=moonshot`, the
-/// URL `install-mcp --client kimi-code` writes. The Moonshot API rejects
-/// tool parameter schemas with root-level `anyOf`/`oneOf`/`allOf`, so
-/// the flavored tools/list must return `memory_read_page` without them
-/// while keeping the rest of the schema intact.
+/// Kimi Code's real flow: independent stateless POSTs against
+/// `/mcp?flavor=moonshot` must return `memory_read_page` without root
+/// combinators, the rest of the schema intact.
 #[tokio::test]
 async fn stateless_moonshot_flavor_strips_root_any_of() {
     let tmp = TempDir::new().unwrap();
@@ -221,9 +215,7 @@ async fn stateless_moonshot_flavor_strips_root_any_of() {
     );
 }
 
-/// Control: without the flavor marker the SAME tools/list keeps the
-/// upstream schema shape, root `anyOf` included — every other client is
-/// unaffected by the Kimi Code workaround.
+/// Control: without the marker, tools/list keeps the upstream root `anyOf`.
 #[tokio::test]
 async fn stateless_tools_list_without_flavor_keeps_root_any_of() {
     let tmp = TempDir::new().unwrap();

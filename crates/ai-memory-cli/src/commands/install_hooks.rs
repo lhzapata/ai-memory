@@ -673,11 +673,9 @@ fn expand_grok_placeholders_with(
 }
 
 fn hook_server_url_from_mcp_url(url: &str) -> Option<String> {
-    // Client-flavor query markers (Kimi Code's `?flavor=moonshot`) must
-    // not leak into the hook URL: hooks POST to `<origin>/hook`, so the
-    // inferred base needs query/fragment dropped BEFORE the `/mcp`
-    // suffix peel below — otherwise the suffix never matches and the
-    // whole `/mcp?flavor=...` tail would be baked into hook commands.
+    // Drop query/fragment BEFORE the `/mcp` peel: Kimi Code's
+    // `?flavor=moonshot` marker must never leak into hook URLs (and it
+    // would stop the suffix from matching).
     let base = url
         .trim()
         .split(['?', '#'])
@@ -3685,11 +3683,8 @@ mod tests {
         assert_eq!(inferred.auth_token.as_deref(), Some("secret-token"));
     }
 
-    /// Kimi Code's mcp.json entry points at `/mcp?flavor=moonshot`
-    /// (Moonshot rejects root-level schema combinators). Inferring the
-    /// hook URL from that entry must strip BOTH the query marker and the
-    /// `/mcp` path — hooks POST to `<origin>/hook`, so a flavored or
-    /// `/mcp`-suffixed base would 404 every capture.
+    /// Inferring the hook URL from Kimi Code's flavored mcp.json entry
+    /// must yield the bare origin — hooks POST to `<origin>/hook`.
     #[test]
     fn kimi_code_mcp_inference_strips_flavor_query_and_mcp_path() {
         let inferred = infer_json_mcp_config(
@@ -3727,8 +3722,7 @@ mod tests {
                 "http://homelab:49374/mcp/?flavor=moonshot",
                 Some("http://homelab:49374"),
             ),
-            // A reverse-proxy prefix survives — hooks then POST to
-            // `<prefix>/hook` under it (base_path handling).
+            // Reverse-proxy prefix survives; hooks POST under it.
             (
                 "http://homelab:49374/wiki/mcp",
                 Some("http://homelab:49374/wiki"),
