@@ -96,7 +96,7 @@ mod tests {
     fn schema_ahead_message_is_actionable() {
         let rendered = StoreError::DataSchemaAhead {
             applied: "V99 (future_feature)".to_string(),
-            supported: 29,
+            supported: 30,
         }
         .to_string();
 
@@ -109,7 +109,7 @@ mod tests {
             "{rendered}"
         );
         assert!(rendered.contains("V99 (future_feature)"), "{rendered}");
-        assert!(rendered.contains("through V29"), "{rendered}");
+        assert!(rendered.contains("through V30"), "{rendered}");
     }
 
     #[test]

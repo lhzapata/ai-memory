@@ -19,7 +19,7 @@
 This page documents how to register ai-memory as an MCP server with
 agent CLIs beyond the README quick start.
 
-Claude Code, OpenAI Codex, Devin CLI, Cursor, Gemini CLI, Antigravity CLI, Grok Build CLI, Zero, OpenClaw, OpenCode, and
+Claude Code, OpenAI Codex, Devin CLI, Cursor, Gemini CLI, Antigravity CLI, Grok Build CLI, Zero, Kimi Code, OpenClaw, OpenCode, and
 OMP have automatic capture integrations (host-native commands for supported
 local profiles, plus generated TypeScript plugin/extension files for OpenClaw /
 OpenCode / OMP) and are covered in the [main README](../README.md#quick-start).
@@ -111,7 +111,7 @@ metadata.
 > **One-shot tip:** every snippet below is also reachable from the
 > CLI:
 > ```bash
-> ai-memory install-mcp --client gemini-cli   # or cursor / claude-desktop / openclaw / omp / pi / antigravity-cli / grok / vscode-copilot
+> ai-memory install-mcp --client gemini-cli   # or cursor / claude-desktop / openclaw / omp / pi / antigravity-cli / grok / kimi-code / devin / zero / vscode-copilot
 > ```
 
 ---
@@ -573,6 +573,82 @@ fill both in:
   stance as the single-slot `/handoff` fallback). A payload that does carry
   its own `session_id` always wins over both.
 
+## Kimi Code
+
+**Status:** ✅ MCP supported. ✅ Lifecycle hooks supported via
+`ai-memory install-hooks --agent kimi-code --apply`.
+
+**Config file (MCP):** `~/.kimi-code/mcp.json`
+(`$KIMI_CODE_HOME/mcp.json` when `KIMI_CODE_HOME` is set).
+
+Kimi Code treats any `mcpServers` entry with a `url` field and no
+`transport` field as a streamable-HTTP server, so the entry needs no
+transport key:
+
+```bash
+ai-memory install-mcp --client kimi-code --apply \
+    --server-url "http://homelab:49374/mcp" --auth-token "$TOKEN"
+```
+
+which merges:
+
+```json
+{
+  "mcpServers": {
+    "ai-memory": {
+      "url": "http://homelab:49374/mcp?flavor=moonshot",
+      "headers": { "Authorization": "Bearer <token>" }
+    }
+  }
+}
+```
+
+`install-mcp` appends the `?flavor=moonshot` query itself (idempotently, so
+re-runs don't duplicate it). The Moonshot API validates tool parameter
+schemas against a restricted dialect ("moonshot flavored json schema") that
+rejects root-level `anyOf`/`oneOf`/`allOf` combinators — including the
+`anyOf` on `memory_read_page` — and fails the whole session with a 400 at
+`tools/list`. The ai-memory server answers requests carrying this flavor
+with flat schemas; every other client keeps receiving the upstream schemas
+unchanged.
+
+**Config file (hooks):** `~/.kimi-code/config.toml` (same `$KIMI_CODE_HOME`
+base). Kimi Code stores hooks as `[[hooks]]` array entries in the same TOML
+file that holds its provider/model settings; `install-hooks` merges
+ai-memory's entries and preserves everything else:
+
+```bash
+ai-memory install-hooks --agent kimi-code --apply \
+    --server-url "http://homelab:49374" --auth-token "$TOKEN"
+```
+
+The installed entries cover 10 events — `SessionStart`, `SessionEnd`,
+`UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`
+(Kimi Code fires `PostToolUse` on successful calls only), `Stop`,
+`SubagentStart`, `SubagentStop`, and `PreCompact` — with a Kimi Code-specific
+script bundle /
+native `ai-memory hook --event … --agent kimi-code` commands (native is the
+default for local installs; the staged scripts under
+`~/.local/share/ai-memory/hooks/kimi-code/` are the compatibility fallback).
+Capture is fire-and-forget; a pending handoff is injected at `SessionStart`
+via the hook's stdout (Kimi Code appends stdout to context on exit 0), the
+same pattern as Gemini CLI.
+
+**Gotchas:**
+- Do not add a `transport` field for HTTP servers: `url` alone means
+  streamable HTTP; `transport: "sse"` selects the legacy SSE transport.
+- Do not strip the `?flavor=moonshot` query from the installed URL: without
+  it the Moonshot API rejects `memory_read_page`'s root `anyOf` and every
+  session fails at `tools/list`.
+- Hook entries accept only `event`, `matcher`, `command`, and `timeout`
+  (seconds, 1-600, default 30). Any extra field makes Kimi Code fail to load
+  the entire `config.toml`, so prefer `install-hooks --apply` over hand
+  edits.
+- Kimi Code runs identical commands only once when multiple rules match the
+  same event. `PostToolUse` and `PostToolUseFailure` reuse one handler command,
+  but are mutually exclusive event triggers, so successful and failed calls
+  are both captured once.
+
 ## OpenClaw
 
 **Status:** ✅ MCP supported. ✅ Lifecycle hooks supported via a native
@@ -734,8 +810,8 @@ that *starts* the next one - to play nicely with ai-memory:
 
 | Side | What's needed | Covered by |
 |---|---|---|
-| **Ending side** | The agent must create a handoff, either through a true session-end hook, the supported Codex manual finalizer, or by calling `memory_handoff_begin`. | Built-in automatically for Claude Code, Devin CLI, Cursor, Gemini CLI, Grok Build CLI, Zero, OpenClaw, OpenCode, and OMP. Codex has no reliable true session-end event, so run `ai-memory finalize-session` when you need the final summary/handoff/auto-improve eligibility. Antigravity CLI has no true session-end event in the current integration, so ask it to call `memory_handoff_begin` before quitting when you need a handoff. |
-| **Starting side** | Either (a) the session-start/plugin path injects the handoff via `/handoff`, OR (b) the model proactively calls `memory_handoff_accept` on first turn. | (a) is built-in for Claude Code / Codex / Devin CLI / Cursor / Gemini CLI / Antigravity CLI / OpenClaw / OpenCode / OMP. It requires a client that consumes startup-hook stdout or an equivalent context-injection result. Grok and Zero are explicitly excluded because they discard SessionStart stdout; use (b). (b) works for any MCP-capable client if you nudge the model - see [the managed routing package](usage.md#install-the-routing-snippet-and-agent-skills). |
+| **Ending side** | The agent must create a handoff, either through a true session-end hook, the supported Codex manual finalizer, or by calling `memory_handoff_begin`. | Built-in automatically for Claude Code, Devin CLI, Cursor, Gemini CLI, Grok Build CLI, Zero, Kimi Code, OpenClaw, OpenCode, and OMP. Codex has no reliable true session-end event, so run `ai-memory finalize-session` when you need the final summary/handoff/auto-improve eligibility. Antigravity CLI has no true session-end event in the current integration, so ask it to call `memory_handoff_begin` before quitting when you need a handoff. |
+| **Starting side** | Either (a) the session-start/plugin path injects the handoff via `/handoff`, OR (b) the model proactively calls `memory_handoff_accept` on first turn. | (a) is built-in for Claude Code / Codex / Devin CLI / Cursor / Gemini CLI / Antigravity CLI / Kimi Code / OpenClaw / OpenCode / OMP. It requires a client that consumes startup-hook stdout or an equivalent context-injection result. Grok and Zero are explicitly excluded because they discard SessionStart stdout; use (b). (b) works for any MCP-capable client if you nudge the model - see [the managed routing package](usage.md#install-the-routing-snippet-and-agent-skills). |
 
 OpenCode uses its official `session.deleted` plugin event for true session-end
 delivery. Its generated plugin also sends a deduped best-effort close for any

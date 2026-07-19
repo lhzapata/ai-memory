@@ -9,7 +9,7 @@ path (docker + Claude Code). This page covers everything else:
 - [Arch Linux native packages (AUR)](#arch-linux-native-packages-aur)
   (systemd system service or user service)
 - [Configuring other agent CLIs](#configuring-other-agent-clis)
-  (Codex, Devin CLI, OpenCode, OMP, Pi, Cursor, Claude Desktop, Gemini CLI, Antigravity CLI, Grok Build CLI, Zero, OpenClaw, VS Code Copilot)
+  (Codex, Devin CLI, OpenCode, OMP, Pi, Cursor, Claude Desktop, Gemini CLI, Antigravity CLI, Grok Build CLI, Zero, Kimi Code, OpenClaw, VS Code Copilot)
 - [Installing hooks without docker](#installing-hooks-without-docker)
   (curl-based installer)
 - [Running ai-memory without docker](#running-ai-memory-without-docker)
@@ -499,7 +499,7 @@ Each agent CLI needs two things:
    becomes manual.
 
 Claude Desktop is MCP-only today. Claude Code, Codex, Devin CLI, OpenCode,
-OMP, Cursor, Gemini CLI, Antigravity CLI, Grok Build CLI, and OpenClaw have lifecycle capture paths through
+OMP, Cursor, Gemini CLI, Antigravity CLI, Grok Build CLI, Kimi Code, and OpenClaw have lifecycle capture paths through
 `install-hooks`.
 
 > **Hook install pattern.** Local supported profiles default to host-native
@@ -575,6 +575,43 @@ The `SessionStart` hook injects pending handoffs through Devin's
 from `DEVIN_PROJECT_DIR` or the hook process working directory when the payload
 omits it, and mints/reuses a per-host session id from hook state when necessary,
 so those events are still captured. A payload-provided value always wins.
+
+### Kimi Code
+
+Kimi Code keeps MCP servers in `~/.kimi-code/mcp.json` and lifecycle hooks in
+`~/.kimi-code/config.toml`; both move together when `$KIMI_CODE_HOME` is set.
+The CLI also accepts `--agent kimi` as an alias. `install-mcp` writes the
+server URL with a `?flavor=moonshot` query because the Moonshot API rejects
+root-level `anyOf`/`oneOf`/`allOf` in tool parameter schemas ("moonshot
+flavored json schema") — the ai-memory server answers flavored requests with
+flat schemas, and all other clients keep the upstream shape.
+
+```bash
+ai-memory install-mcp --client kimi-code --apply \
+    --server-url "http://homelab:49374/mcp" \
+    --auth-token "$TOKEN"
+
+ai-memory install-hooks --agent kimi-code --apply \
+    --server-url "http://homelab:49374" \
+    --auth-token "$TOKEN"
+```
+
+`install-hooks` merges `[[hooks]]` entries into `config.toml`, preserving the
+provider/model settings the same file holds. Entries cover 10 events —
+`SessionStart`, `SessionEnd`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`,
+`PostToolUseFailure` (Kimi Code reports tool failures separately from
+successful calls; it reuses the post-tool-use handler), `Stop`,
+`SubagentStart`, `SubagentStop`, and `PreCompact` — and default to
+native `ai-memory hook --event … --agent kimi-code` commands on local installs
+(local spool plus batched delivery, capture-policy v1 enforced); the staged
+script bundle under `~/.local/share/ai-memory/hooks/kimi-code/` is the
+compatibility fallback (fire-and-forget POSTs to `/hook`). A pending handoff
+is injected at `SessionStart` through the hook's stdout, which Kimi Code
+appends to the model context.
+
+Kimi Code hook entries accept only `event`, `matcher`, `command`, and
+`timeout`; extra fields make the whole `config.toml` fail to load, so prefer
+`install-hooks --apply` over hand edits.
 
 ### OpenCode
 

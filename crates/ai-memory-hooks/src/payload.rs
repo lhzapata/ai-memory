@@ -571,7 +571,10 @@ fn best_title_hint(event: HookEvent, raw: &serde_json::Value) -> Option<String> 
     match event {
         HookEvent::SessionStart => extract_string(raw, &["model", "title"]),
         HookEvent::UserPrompt => {
-            extract_string(raw, &["prompt", "message", "text"]).map(|s| truncate_for_title(&s))
+            // Kimi Code sends `prompt` as content blocks
+            // (`[{"type":"text","text":...}]`); `extract_content` flattens
+            // them and returns identical values for plain-string agents.
+            extract_content(raw, &["prompt", "message", "text"]).map(|s| truncate_for_title(&s))
         }
         HookEvent::PreToolUse | HookEvent::PostToolUse => {
             extract_string(raw, &["tool", "tool_name", "name"])
@@ -1286,6 +1289,28 @@ mod tests {
         let title = env.title_hint.unwrap();
         assert!(title.chars().count() <= 80);
         assert!(title.ends_with('…'));
+    }
+
+    /// Kimi Code's content-block `prompt` must flatten into the title
+    /// exactly like the body excerpt does.
+    #[test]
+    fn user_prompt_title_flattens_kimi_code_content_blocks() {
+        let q = HookQuery {
+            event: "user-prompt".into(),
+            agent: Some("kimi-code".into()),
+            ..Default::default()
+        };
+        let env = HookEnvelope::from_query_and_body(
+            q,
+            serde_json::json!({
+                "hook_event_name": "UserPromptSubmit",
+                "session_id": "session_kimi-1",
+                "cwd": "/tmp/proj",
+                "prompt": [ { "type": "text", "text": "hello" } ]
+            }),
+        );
+        assert_eq!(env.title_hint.as_deref(), Some("hello"));
+        assert_eq!(env.body_excerpt.as_deref(), Some("hello"));
     }
 
     #[test]

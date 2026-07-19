@@ -208,6 +208,9 @@ Client cleanup hints:
   `.devin/skills` for stale MCP, hook, or routing-skill entries.
 - Gemini CLI and Antigravity CLI: check `settings.json` or equivalent hook/MCP
   config files.
+- Kimi Code: check `~/.kimi-code/mcp.json` and the `[[hooks]]` entries in
+  `~/.kimi-code/config.toml` (both under `$KIMI_CODE_HOME` when set) for stale
+  MCP or hook entries.
 - OpenCode, OpenClaw, and OMP: check MCP config and plugin/extension directories;
   move old memory plugins to a disabled/quarantine directory before deleting.
 - VS Code Copilot and Claude Desktop: these are usually MCP-only, so confirm
@@ -301,7 +304,7 @@ docker exec ai-memory git -C /data/wiki log --oneline
 
 Durable project rules belong in the agent's rules file, not only in the
 wiki. For Claude Code that is `CLAUDE.md`; for Codex, Devin CLI, OpenCode,
-Cursor, Gemini CLI, and Grok Build CLI it is usually `AGENTS.md`.
+Cursor, Gemini CLI, Grok Build CLI, and Kimi Code it is usually `AGENTS.md`.
 
 The consolidator classifies compiled observations as `decision`,
 `fact`, `rule`, or `gotcha`. Rule-tagged pages are routed to

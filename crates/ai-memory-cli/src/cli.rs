@@ -836,6 +836,9 @@ pub enum AgentChoice {
     /// hook scripts. Devin consumes the handoff via
     /// `hookSpecificOutput.additionalContext` on `SessionStart`.
     Devin,
+    /// Kimi Code CLI (Moonshot AI).
+    #[value(alias = "kimi")]
+    KimiCode,
 }
 
 impl AgentChoice {
@@ -860,6 +863,7 @@ impl AgentChoice {
             Self::Grok => AgentKind::Grok,
             Self::Zero => AgentKind::Zero,
             Self::Devin => AgentKind::Devin,
+            Self::KimiCode => AgentKind::KimiCode,
         }
     }
 
@@ -942,6 +946,9 @@ pub enum McpClient {
     /// Grok ignores SessionStart stdout, so handoffs are recovered via
     /// MCP `memory_handoff_accept` rather than hook injection.
     Grok,
+    /// Kimi Code CLI (Moonshot AI).
+    #[value(alias = "kimi")]
+    KimiCode,
     /// VS Code GitHub Copilot (agent mode) — per-workspace
     /// `.vscode/mcp.json`. Copilot's agent mode reads MCP servers
     /// from VS Code's own MCP framework (top-level `servers` key),

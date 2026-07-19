@@ -38,8 +38,8 @@ use crate::cli::{AgentChoice, SetupAgentArgs};
 use crate::commands::install_mcp;
 use crate::commands::render_shared::{
     ANTIGRAVITY_LIFECYCLE_EVENTS, ANTIGRAVITY_TOOL_EVENTS, CODEX_PROFILE, CURSOR_PROFILE,
-    GEMINI_PROFILE, build_claude_code_payload, build_devin_payload, build_grok_payload,
-    hook_script_for_current_platform,
+    GEMINI_PROFILE, KIMI_CODE_EVENTS, build_claude_code_payload, build_devin_payload,
+    build_grok_payload, hook_script_for_current_platform,
 };
 use crate::config::{Config, DEFAULT_SERVER_URL};
 
@@ -145,6 +145,10 @@ pub fn run(config: &Config, args: SetupAgentArgs) -> Result<()> {
             &args,
             &[&ANTIGRAVITY_TOOL_EVENTS, &ANTIGRAVITY_LIFECYCLE_EVENTS],
         ),
+        // Kimi's success and failure post-tool events share one script. The
+        // script listing is deduplicated below; apply-mode owns the exact
+        // `[[hooks]]` TOML merge into the user's config.toml.
+        AgentChoice::KimiCode => emit_other(&emit_root, agent_sub, &args, &[&KIMI_CODE_EVENTS]),
         AgentChoice::OpenCode
         | AgentChoice::Pi
         | AgentChoice::Omp
@@ -358,7 +362,12 @@ fn event_script_paths(emit_root: &Path, event_lists: &[&[(&str, &str)]]) -> Vec<
     for events in event_lists {
         for (_, script) in *events {
             let script = hook_script_for_current_platform(script);
-            paths.push(emit_root.join(script.as_ref()));
+            let path = emit_root.join(script.as_ref());
+            // Two events may share one script (Kimi Code's PostToolUseFailure
+            // reuses post-tool-use); list each file once.
+            if !paths.contains(&path) {
+                paths.push(path);
+            }
         }
     }
     paths
@@ -624,5 +633,43 @@ mod tests {
             !rendered.contains("subagent-start") && !rendered.contains("subagent-stop"),
             "Gemini has no subagent hook events; setup-agent must not print nonexistent scripts"
         );
+    }
+
+    #[test]
+    fn kimi_code_manual_script_paths_cover_kimi_event_set() {
+        // Kimi Code's hook vocabulary is Claude Code's nine events plus
+        // PostToolUseFailure; the failure entry reuses post-tool-use.sh,
+        // so the script list carries nine unique files for ten events.
+        let root = Path::new("/hooks/kimi-code");
+        let paths = event_script_paths(root, &[&KIMI_CODE_EVENTS]);
+        let rendered = paths
+            .iter()
+            .map(|path| path.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        for script in [
+            "session-start",
+            "session-end",
+            "user-prompt-submit",
+            "pre-tool-use",
+            "post-tool-use",
+            "pre-compact",
+            "stop",
+            "subagent-start",
+            "subagent-stop",
+        ] {
+            assert!(
+                rendered.contains(script),
+                "Kimi Code setup-agent must list {script}; got:\n{rendered}"
+            );
+        }
+        assert!(
+            KIMI_CODE_EVENTS
+                .iter()
+                .any(|(event, _)| *event == "PostToolUseFailure")
+        );
+        assert_eq!(KIMI_CODE_EVENTS.len(), 10);
+        assert_eq!(paths.len(), 9);
     }
 }
