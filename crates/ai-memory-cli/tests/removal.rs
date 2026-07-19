@@ -1028,3 +1028,58 @@ fn uninstall_mcp_custom_url_removes_kimi_code_only_by_endpoint() {
     );
     assert!(after["mcpServers"].get("other").is_some());
 }
+
+#[test]
+fn default_uninstall_removes_installed_kimi_code_flavored_url() {
+    let _guard = cli_test_lock();
+    let home = tempfile::tempdir().unwrap();
+    let kimi = home.path().join(".kimi-code");
+    std::fs::create_dir_all(&kimi).unwrap();
+    let mcp = kimi.join("mcp.json");
+    std::fs::write(
+        &mcp,
+        r#"{"mcpServers":{"other":{"url":"http://other/mcp"}}}"#,
+    )
+    .unwrap();
+
+    let install = command_with_home(home.path())
+        .args([
+            "install-mcp",
+            "--client",
+            "kimi-code",
+            "--server-url",
+            "http://127.0.0.1:49374",
+            "--apply",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        install.status.success(),
+        "install-mcp failed: {}",
+        String::from_utf8_lossy(&install.stderr)
+    );
+    let installed: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&mcp).unwrap()).unwrap();
+    assert_eq!(
+        installed["mcpServers"]["ai-memory"]["url"],
+        "http://127.0.0.1:49374/mcp?flavor=moonshot"
+    );
+
+    let output = command_with_home(home.path())
+        .args(["uninstall", "--apply", "--only", "mcp", "--yes"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "uninstall failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let after: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&mcp).unwrap()).unwrap();
+    assert!(
+        after["mcpServers"].get("ai-memory").is_none(),
+        "the exact flavored URL install-mcp writes must be removed"
+    );
+    assert!(after["mcpServers"].get("other").is_some());
+}

@@ -622,11 +622,11 @@ ai-memory install-hooks --agent kimi-code --apply \
     --server-url "http://homelab:49374" --auth-token "$TOKEN"
 ```
 
-The installed entries cover 9 events — `SessionStart`, `SessionEnd`,
-`UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`, `SubagentStart`,
-`SubagentStop`, and `PreCompact` — with a Kimi Code-specific script bundle /
-native `ai-memory hook --event … --agent kimi-code` commands (native is the
-default for local installs; the staged scripts under
+The installed entries cover 10 events — `SessionStart`, `SessionEnd`,
+`UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `Stop`,
+`SubagentStart`, `SubagentStop`, and `PreCompact` — with a Kimi Code-specific
+script bundle / native `ai-memory hook --event … --agent kimi-code` commands
+(native is the default for local installs; the staged scripts under
 `~/.local/share/ai-memory/hooks/kimi-code/` are the compatibility fallback).
 Capture is fire-and-forget; a pending handoff is injected at `SessionStart`
 via the hook's stdout (Kimi Code appends stdout to context on exit 0), the
@@ -642,8 +642,10 @@ same pattern as Gemini CLI.
   (seconds, 1-600, default 30). Any extra field makes Kimi Code fail to load
   the entire `config.toml`, so prefer `install-hooks --apply` over hand
   edits.
-- Kimi Code runs rules with an identical `command` only once; ai-memory's
-  entries use a distinct command per event, so all 9 fire independently.
+- Kimi Code runs identical commands only once when multiple rules match the
+  same event. `PostToolUse` and `PostToolUseFailure` reuse one handler command,
+  but are mutually exclusive event triggers, so successful and failed calls
+  are both captured once.
 
 ## OpenClaw
 

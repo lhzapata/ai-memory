@@ -442,7 +442,9 @@ fn apply_change(change: &PlannedChange, name: Option<&str>, url: &str) -> anyhow
                         }
                         RewriteOp::ZeroHooksJson => strip_zero_hooks(&out)?.new_content,
                         RewriteOp::KimiCodeHooksToml => strip_kimi_code_hooks(&out)?.new_content,
-                        RewriteOp::McpJson(client) => strip_mcp_json(&out, client, name, url)?.0,
+                        RewriteOp::McpJson(client) => {
+                            strip_mcp_json_client(&out, client, name, url)?.0
+                        }
                         RewriteOp::McpToml => strip_mcp_toml(&out, name, url)?.0,
                     };
                 }

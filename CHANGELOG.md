@@ -27,9 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (Kimi Code treats `url` with no `transport` field as streamable HTTP) plus
   optional bearer `headers`. `install-hooks` merges `[[hooks]]` entries into
   `~/.kimi-code/config.toml`, preserving the provider/model settings the same
-  file holds, and covers 9 events: `SessionStart`, `SessionEnd`,
-  `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`, `SubagentStart`,
-  `SubagentStop`, and `PreCompact`. Both paths honor `$KIMI_CODE_HOME`.
+  file holds, and covers 10 events: `SessionStart`, `SessionEnd`,
+  `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `Stop`,
+  `SubagentStart`, `SubagentStop`, and `PreCompact`. Both paths honor
+  `$KIMI_CODE_HOME`.
   Handoff injection happens at `SessionStart` through hook stdout, which Kimi
   Code appends to the model context; `setup-agent` and `uninstall` handle the
   new agent like the other first-class integrations. The `install-mcp` entry

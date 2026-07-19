@@ -597,9 +597,10 @@ ai-memory install-hooks --agent kimi-code --apply \
 ```
 
 `install-hooks` merges `[[hooks]]` entries into `config.toml`, preserving the
-provider/model settings the same file holds. Entries cover 9 events —
+provider/model settings the same file holds. Entries cover 10 events —
 `SessionStart`, `SessionEnd`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`,
-`Stop`, `SubagentStart`, `SubagentStop`, and `PreCompact` — and default to
+`PostToolUseFailure`, `Stop`, `SubagentStart`, `SubagentStop`, and `PreCompact`
+— and default to
 native `ai-memory hook --event … --agent kimi-code` commands on local installs
 (local spool plus batched delivery, capture-policy v1 enforced); the staged
 script bundle under `~/.local/share/ai-memory/hooks/kimi-code/` is the
