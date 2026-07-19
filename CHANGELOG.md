@@ -18,7 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.ai-memory.toml` ([#194]). Supported native hooks and generated
   OpenCode/OMP/Pi/OpenClaw integrations apply the policy before local spool or
   network delivery; `ai-memory hook --check-capture` safely reports a bounded
-  local decision. This changes no MCP tools and needs no database migration.
+  local decision. Generated integrations resolve relative file-tool paths from
+  the event `cwd`, including nested working directories, rather than from the
+  marker directory. This changes no MCP tools and needs no database migration.
 - Grok Build CLI is now a first-class MCP client as well as a hook agent:
   `install-mcp --client grok` renders and `--apply` merges a native HTTP
   entry into `$GROK_HOME/config.toml` (default `~/.grok/config.toml`)
