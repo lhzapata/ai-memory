@@ -777,10 +777,9 @@ fn normalize_segments(path: &str) -> Option<String> {
             format!("{}:/", path[..1].to_ascii_uppercase()),
             path[3..].split('/').collect(),
         )
-    } else if let Some(rest) = path.strip_prefix('/') {
-        ("/".into(), rest.split('/').collect())
     } else {
-        return None;
+        let rest = path.strip_prefix('/')?;
+        ("/".into(), rest.split('/').collect())
     };
     let mut parts = Vec::new();
     for part in tail {
